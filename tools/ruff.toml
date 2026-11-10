@@ -1,0 +1,13 @@
+line-length = 130
+target-version = "py312"
+extend-exclude = ["packages/db/fc_db/migrations/versions"]
+
+[lint]
+select = ["E", "F", "W", "I", "B", "UP", "BLE", "RUF"]
+ignore = ["B008", "RUF001", "RUF002", "RUF003"]
+
+[lint.isort]
+known-first-party = ["fc_core", "fc_db", "fc_platform", "fc_api", "fc_worker"]
+
+[format]
+exclude = ["packages/db/fc_db/migrations/versions/*"]

@@ -1,0 +1,13 @@
+alembic==1.14.1
+fastapi==0.115.14
+httpx==0.28.1
+mypy==1.13.0
+psycopg==3.2.13
+psycopg-binary==3.2.13
+pydantic==2.14.3
+pytest==8.3.5
+python-multipart==0.0.33
+ruff==0.8.6
+SQLAlchemy==2.0.57
+starlette==0.46.2
+uvicorn==0.32.1
