@@ -185,7 +185,7 @@ def test_e2e02_api_level_approved_unsent_blocked_and_sent_flagged(world: World) 
     p.auditor.post(f"/api/v1/rate-documents/{rev['id']}/rules", {"rules": Pilot.fuel_rules("29.0"), "replace": True}, expect=201)
     p.approver.post(f"/api/v1/rate-documents/{rev['id']}/confirm", expect=200)
     blocked = p.approver.post(
-        f"/api/v1/claims/{approved['id']}/sent", {"sent_on": "2026-04-02", "sent_to": "claims@carrier.example"}, expect=409
+        f"/api/v1/claims/{approved['id']}/sent", {"sent_on": "2026-04-01", "sent_to": "claims@carrier.example"}, expect=409
     ).json()
     assert blocked["code"] == "STALE_BASIS" and blocked["claim"]["banner"]["kind"] == "stale_basis"
     assert (blocked["claim"]["banner"]["old_total_cents"], blocked["claim"]["banner"]["new_total_cents"]) == (4071, 3983)
@@ -195,7 +195,7 @@ def test_e2e02_api_level_approved_unsent_blocked_and_sent_flagged(world: World) 
     p.auditor.post(f"/api/v1/claims/{approved['id']}/redraft", expect=200)
     p.approver.post(f"/api/v1/claims/{approved['id']}/approve", {}, expect=200)
     done = p.approver.post(
-        f"/api/v1/claims/{approved['id']}/sent", {"sent_on": "2026-04-02", "sent_to": "claims@carrier.example"}, expect=200
+        f"/api/v1/claims/{approved['id']}/sent", {"sent_on": "2026-04-01", "sent_to": "claims@carrier.example"}, expect=200
     ).json()
     assert done["status"] == "sent" and done["claimed_cents"] == 3983
 
