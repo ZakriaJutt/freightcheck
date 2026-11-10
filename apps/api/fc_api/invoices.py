@@ -142,6 +142,7 @@ class InvoiceIn(BaseModel):
     forwarded_received_at: datetime | None = None
     fields_confirmed: bool = True  # manual keying is a person's entry
     revision_of: uuid.UUID | None = None
+    lane_key: str | None = Field(default=None, min_length=1)
 
 
 def invoice_out(ctx: Ctx, inv_id: uuid.UUID) -> dict[str, Any]:
@@ -194,10 +195,19 @@ def create_invoice(body: InvoiceIn, request: Request, ctx: Ctx = Depends(tenant_
                     ),
                     contract_term_days=carrier.dispute_window_days,
                     contract_term_has_source=carrier.dispute_window_source_file_id is not None,
+                    today=today(),
                 )
             )
         except ValueError as exc:
             raise ApiError(422, "RECEIPT_NOTE_REQUIRED", str(exc), field="receipt_evidence.user_note") from exc
+        if dl.rejected_evidence:
+            # B1-008: a receipt cannot postdate today or the forward's arrival at FreightCheck.
+            raise ApiError(
+                422,
+                "RECEIPT_DATE_IMPOSSIBLE",
+                "receipt evidence after today or after the forward arrived: " + ", ".join(dl.rejected_evidence),
+                field="receipt_evidence",
+            )
         if len({ln.line_no for ln in body.lines}) != len(body.lines):
             raise ApiError(422, "DUPLICATE_LINE", "line numbers must be unique", field="lines")
         try:
@@ -216,6 +226,7 @@ def create_invoice(body: InvoiceIn, request: Request, ctx: Ctx = Depends(tenant_
                         delivery_date=body.delivery_date,
                         billed_weight_lb=body.billed_weight_lb,
                         billed_class=body.billed_class,
+                        lane_key=body.lane_key,
                         total_cents=body.total_cents,
                         fields_confirmed=body.fields_confirmed,
                         receipt_date=dl.receipt_date,

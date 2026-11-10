@@ -19,11 +19,11 @@ from typing import Any, Literal
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from fc_api.core import APPROVER_PLUS, AUDITOR_PLUS, VIEWER_PLUS, ApiError, Ctx, idempotent, jsonable, tenant_ctx
-from fc_core.ledger import ClaimEvent, LineBasis, evaluate_approval, validate_event, withdrawal_note
+from fc_core.ledger import ClaimEvent, LineBasis, evaluate_approval, settlement_cap, validate_event, withdrawal_note
 from fc_db import ops
 from fc_db.tables import (
     carrier_account,
@@ -318,6 +318,19 @@ def approve_claim(claim_id: str, body: ApproveIn, request: Request, ctx: Ctx = D
 class SentIn(BaseModel):
     sent_on: date
     sent_to: str = Field(min_length=3)
+    override_reason: str | None = None  # required when the send is recorded after contest-by
+
+
+EVIDENCE_PURPOSES = ("carrier_response", "settlement_evidence")
+
+
+def _require_evidence(ctx: Ctx, file_id: uuid.UUID) -> None:
+    """B1-011: decision and settlement evidence must be carrier correspondence or settlement evidence."""
+    f = ctx.row(source_file, file_id)
+    if f.purpose not in EVIDENCE_PURPOSES:
+        raise ApiError(
+            422, "WRONG_EVIDENCE", "evidence must be a carrier response or settlement document", field="evidence_file_id"
+        )
 
 
 @router.post("/claims/{claim_id}/sent")
@@ -327,16 +340,41 @@ def mark_sent(claim_id: str, body: SentIn, request: Request, ctx: Ctx = Depends(
 
     def go() -> tuple[int, dict[str, Any]]:
         c = ctx.row(claim, claim_id, for_update=True)
-        if c.stale_basis:
+        if c.status != "approved":
+            raise ApiError(409, "NOT_APPROVED", f"claim is {c.status}")
+        # B1-009: a send happens after approval and not in the future.
+        approved_on = ctx.conn.execute(
+            select(func.max(claim_event.c.occurred_on)).where(
+                claim_event.c.claim_id == c.id, claim_event.c.event_type == "approved"
+            )
+        ).scalar_one()
+        if body.sent_on > today() or (approved_on is not None and body.sent_on < approved_on):
+            raise ApiError(422, "BAD_SENT_ON", "sent_on must be between the approval date and today", field="sent_on")
+        # B1-001: the basis must still be current at the moment the send is recorded.
+        if c.stale_basis or ops.basis_changed(ctx.conn, c):
             raise ApiError(
                 409, "STALE_BASIS", "the basis changed after approval; redraft and approve again", claim=claim_out(ctx, c.id)
             )
-        if c.status != "approved":
-            raise ApiError(409, "NOT_APPROVED", f"claim is {c.status}")
+        # B1-002: a send after contest-by needs a recorded override (at approval or here).
+        inv = ctx.row(invoice, c.invoice_id)
+        when = max(body.sent_on, today())
+        late = (inv.contest_by is None and inv.deadline_basis != "none_broker") or (
+            inv.contest_by is not None and when > inv.contest_by
+        )
+        reason = (body.override_reason or "").strip()
+        if late and not reason and c.late_override_reason is None:
+            raise ApiError(409, "PAST_CONTEST_BY", f"contest-by {inv.contest_by} has passed; an override reason is required")
         ctx.conn.execute(
             claim.update()
             .where(claim.c.id == c.id)
-            .values(sent_at=body.sent_on, sent_to=body.sent_to, version=claim.c.version + 1, updated_at=func.now())
+            .values(
+                sent_at=body.sent_on,
+                sent_to=body.sent_to,
+                late_send_reason=reason if late and reason else None,
+                late_send_by=ctx.user_id if late and reason else None,
+                version=claim.c.version + 1,
+                updated_at=func.now(),
+            )
         )
         _event(ctx, c.id, "sent", body.sent_on)
         ops.refresh_claim_state(ctx.conn, c.id)
@@ -393,8 +431,12 @@ def add_event(claim_id: str, body: EventIn, request: Request, ctx: Ctx = Depends
         if body.event_type != "withdrawn" and c.status in UNSENT:
             raise ApiError(409, "NOT_SENT", "carrier events need a sent claim")
         if body.evidence_file_id:
-            ctx.row(source_file, body.evidence_file_id)
-        if body.event_type == "decision_partial" and c.claimed_cents is not None and (body.amount_cents or 0) > c.claimed_cents:
+            _require_evidence(ctx, body.evidence_file_id)
+        if (
+            body.event_type in ("decision_partial", "decision_accepted")
+            and c.claimed_cents is not None
+            and (body.amount_cents or 0) > c.claimed_cents
+        ):
             raise ApiError(422, "ABOVE_CLAIMED", "accepted cannot exceed claimed", field="amount_cents")
         _event(
             ctx,
@@ -434,6 +476,7 @@ class SettlementIn(BaseModel):
     settled_on: date
     evidence_file_id: uuid.UUID  # required: no settlement without the carrier's document
     carrier_reference: str | None = None
+    excess_reason: str | None = None  # required when settlements would exceed accepted (or claimed)
 
 
 @router.post("/claims/{claim_id}/settlements")
@@ -444,9 +487,15 @@ def add_settlement(claim_id: str, body: SettlementIn, request: Request, ctx: Ctx
         c = ctx.row(claim, claim_id, for_update=True)
         if c.status in UNSENT or c.status in CLOSED:
             raise ApiError(409, "NOT_SETTLEABLE", f"claim is {c.status}")
-        ctx.row(source_file, body.evidence_file_id)
+        _require_evidence(ctx, body.evidence_file_id)
         if body.method == "short_pay_accepted" and not c.accepted_cents:
             raise ApiError(409, "NO_ACCEPTANCE", "a short-pay counts only after the carrier accepted the claim")
+        # B1-007: settlements may not exceed accepted (or claimed before a decision) without a reason.
+        cap = settlement_cap(c.claimed_cents, c.accepted_cents)
+        if cap is not None and c.settled_cents + body.amount_cents > cap and not (body.excess_reason or "").strip():
+            raise ApiError(
+                422, "ABOVE_ACCEPTED", "settlements would exceed the accepted amount; record excess_reason", field="amount_cents"
+            )
         sid = ctx.conn.execute(
             settlement.insert().values(tenant_id=ctx.tenant_id, claim_id=c.id, **body.model_dump()).returning(settlement.c.id)
         ).scalar_one()
@@ -528,6 +577,8 @@ def basis_metrics(ctx: Ctx = Depends(tenant_ctx)) -> dict[str, int]:
         select(func.count()).select_from(claim).where(claim.c.basis_changed_after_send_at.is_not(None))
     ).scalar_one()
     overrides = ctx.conn.execute(
-        select(func.count()).select_from(claim).where(claim.c.late_override_reason.is_not(None))
+        select(func.count())
+        .select_from(claim)
+        .where(or_(claim.c.late_override_reason.is_not(None), claim.c.late_send_reason.is_not(None)))
     ).scalar_one()
     return {"wrong_basis_sent": wrong_sent, "approvals_by_date_override": overrides}

@@ -229,6 +229,8 @@ def confirm_rate_document(doc_id: str, request: Request, ctx: Ctx = Depends(tena
             raise ApiError(409, "RATE_DOCUMENT_OVERLAP", "overlaps another confirmed document") from exc
         if doc.revises_id is not None:
             marked = ops.mark_dependent_claims(ctx.conn, prior_document_id=doc.revises_id)
+        # B1-001: a new document may now govern lines drafted on another one; re-evaluate them all.
+        marked = ops.merge_marked(marked, ops.reevaluate_claims(ctx.conn, doc.carrier_account_id))
         ops.audit(
             ctx.conn,
             tenant_id=ctx.tenant_id,
@@ -367,24 +369,35 @@ def confirm_fuel_index(value_id: str, request: Request, ctx: Ctx = Depends(tenan
             raise ApiError(409, "NOT_ENTERED", f"value is {v.status}")
         marked: dict[str, list[uuid.UUID]] = {"stale": [], "changed_after_send": []}
         if v.revises_id is not None:
+            prior = ctx.row(fuel_index_price, v.revises_id, for_update=True)
+            if prior.status != "confirmed":  # B1-010: a racing correction already superseded it
+                raise ApiError(409, "PRIOR_NOT_CONFIRMED", "the corrected value is no longer confirmed")
             ctx.conn.execute(
                 fuel_index_price.update()
                 .where(fuel_index_price.c.id == v.revises_id)
                 .values(status="superseded", version=fuel_index_price.c.version + 1, updated_at=func.now())
             )
-        ctx.conn.execute(
-            fuel_index_price.update()
-            .where(fuel_index_price.c.id == v.id)
-            .values(
-                status="confirmed",
-                confirmed_by=ctx.user_id,
-                confirmed_at=func.now(),
-                version=fuel_index_price.c.version + 1,
-                updated_at=func.now(),
-            )
-        )
+        try:
+            with ctx.conn.begin_nested():
+                ctx.conn.execute(
+                    fuel_index_price.update()
+                    .where(fuel_index_price.c.id == v.id)
+                    .values(
+                        status="confirmed",
+                        confirmed_by=ctx.user_id,
+                        confirmed_at=func.now(),
+                        version=fuel_index_price.c.version + 1,
+                        updated_at=func.now(),
+                    )
+                )
+        except IntegrityError as exc:
+            raise ApiError(
+                409, "VALUE_ALREADY_CONFIRMED", "a confirmed value for this index and week exists; correct it instead"
+            ) from exc
         if v.revises_id is not None:
             marked = ops.mark_dependent_claims(ctx.conn, prior_fuel_index_price_id=v.revises_id)
+        # B1-001: a new value may now be the one the week rule selects; re-evaluate open claims.
+        marked = ops.merge_marked(marked, ops.reevaluate_claims(ctx.conn, v.carrier_account_id))
         ops.audit(
             ctx.conn,
             tenant_id=ctx.tenant_id,

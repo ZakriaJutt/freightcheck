@@ -33,7 +33,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             cid = uuid.uuid4().hex
         token = correlation_id.set(cid)
         try:
-            response = await call_next(request)
+            try:
+                response = await call_next(request)
+            except Exception as exc:  # noqa: BLE001 - B1-010: one JSON error contract, with the correlation ID
+                logger.error("unhandled", extra={"fields": {"error": type(exc).__name__}})
+                response = JSONResponse(
+                    error_body("INTERNAL_ERROR", "unexpected error; quote the correlation ID"), status_code=500
+                )
             log(logger, "request", method=request.method, path=request.url.path, status=response.status_code)
             response.headers["X-Correlation-ID"] = cid
             return response
