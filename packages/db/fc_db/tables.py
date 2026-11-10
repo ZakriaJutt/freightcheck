@@ -364,6 +364,8 @@ invoice = Table(
     *_usd(),
     Column("billed_weight_lb", Numeric(10, 2)),
     Column("billed_class", Text),
+    # Migration 0002 (B1-004): lane group that selects lane-scoped rate documents; null = unknown.
+    Column("lane_key", Text),
     Column("fields_confirmed", Boolean, nullable=False, server_default=text("false")),
     Column("status", Text, nullable=False, server_default=text("'needs_review'")),
     Column("field_revision", Integer, nullable=False, server_default=text("1")),
@@ -525,6 +527,9 @@ claim = Table(
     # B1 addition: first time the flag was set; never cleared, feeds the wrong-basis metric.
     Column("basis_changed_after_send_at", TIMESTAMP(timezone=True)),
     Column("late_override_reason", Text),
+    # Migration 0002 (B1-002): override recorded when the send is recorded after contest-by.
+    Column("late_send_reason", Text),
+    Column("late_send_by", UUID(as_uuid=True)),
     Column("approved_by", UUID(as_uuid=True)),
     Column("approved_at", TIMESTAMP(timezone=True)),
     Column("sent_at", Date),
@@ -536,7 +541,9 @@ claim = Table(
     _tfk("carrier_account_id", "carrier_account"),
     _tfk("invoice_id", "invoice"),
     ForeignKeyConstraint(["approved_by"], ["app_user.id"]),
+    ForeignKeyConstraint(["late_send_by"], ["app_user.id"]),
     UniqueConstraint("tenant_id", "reference"),
+    CheckConstraint("(late_send_reason IS NULL) = (late_send_by IS NULL)", name="late_send_has_actor"),
     _enum(
         "status",
         (
@@ -647,6 +654,8 @@ settlement = Table(
     Column("reversed_at", TIMESTAMP(timezone=True)),
     Column("reversed_by", UUID(as_uuid=True)),
     Column("reverse_reason", Text),
+    # Migration 0002 (B1-007): why settlements may exceed the accepted (or claimed) amount.
+    Column("excess_reason", Text),
     _created(),
     *_mutable(),
     _tenant_fk(),
@@ -741,6 +750,20 @@ audit_event = Table(
 )
 Index("ix_audit_event_tenant_id_created_at", audit_event.c.tenant_id, audit_event.c.created_at.desc())
 
+notification = Table(
+    "notification",
+    metadata,
+    _id(),
+    _tenant(),
+    Column("kind", Text, nullable=False),
+    Column("entity_id", UUID(as_uuid=True), nullable=False),
+    Column("sent_at", TIMESTAMP(timezone=True), nullable=False, server_default=func.now()),
+    _created(),
+    _tenant_fk(),
+    UniqueConstraint("tenant_id", "kind", "entity_id"),
+    _enum("kind", ("deadline_30", "deadline_14", "deadline_3", "carrier_overdue")),
+)
+
 TENANT_TABLES = (
     "membership",
     "idempotency_record",
@@ -761,6 +784,7 @@ TENANT_TABLES = (
     "fee_statement_line",
     "job",
     "audit_event",
+    "notification",
 )
 # The app role may insert and read these, never update or delete (append-only).
-APPEND_ONLY = ("audit_event", "claim_event", "check_result", "fee_statement", "fee_statement_line")
+APPEND_ONLY = ("audit_event", "claim_event", "check_result", "fee_statement", "fee_statement_line", "notification")

@@ -10,9 +10,11 @@ from datetime import date
 from typing import Any
 
 from sqlalchemy import Connection, Row, func, select, text
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from fc_core.checks import ENGINE_VERSION, roll_up, run_checks
-from fc_core.ledger import ClaimEvent, Recomputed, SettlementRow, derive, fee_lines
+from fc_core.deadline import SweepClaim, deadline_sweep
+from fc_core.ledger import ClaimEvent, LineBasis, Recomputed, SettlementRow, compare_basis, derive, fee_lines
 from fc_db.repo import get_row, load_context, load_invoice
 from fc_db.tables import (
     audit_event,
@@ -22,7 +24,9 @@ from fc_db.tables import (
     fee_statement,
     fee_statement_line,
     finding,
+    invoice,
     job,
+    notification,
     settlement,
     tenant,
 )
@@ -146,8 +150,7 @@ def run_checks_for_invoice(conn: Connection, invoice_id: uuid.UUID) -> int:
                     tenant_id=inv.tenant_id, invoice_id=inv.id, check_code=r.check_code, line_no=r.line_no, current_result_id=rid
                 )
             )
-    from fc_db.tables import invoice as invoice_t
-
+    invoice_t = invoice
     conn.execute(
         invoice_t.update()
         .where(invoice_t.c.id == inv.id)
@@ -298,3 +301,107 @@ def issue_fee_statement(conn: Connection, period_start: date, period_end: date) 
         entity_id=sid,
     )
     return uuid.UUID(str(sid))
+
+
+# ------------------------------------------------------------------ re-evaluation (B1-001)
+
+UNSENT_STATUSES = ("draft", "approved")
+CLOSED_STATUSES = ("withdrawn", "expired")
+
+
+def basis_changed(conn: Connection, c: Row[Any]) -> list[str]:
+    """Finding keys of a claim whose recomputed basis or amount differ from its snapshot."""
+    lines = [LineBasis(ln["key"], ln["claimed_cents"], ln["basis"]) for ln in (c.basis_snapshot or {}).get("lines", [])]
+    if not lines:
+        return []
+    return compare_basis(lines, recompute(conn, c.invoice_id))
+
+
+def reevaluate_claims(conn: Connection, carrier_account_id: uuid.UUID | None) -> dict[str, list[uuid.UUID]]:
+    """After any confirmation (new document, revision, index value or its correction), recompute
+    every open claim of the carrier (all carriers for a tenant-wide index value). A changed
+    unsent claim becomes stale; a changed sent claim is flagged basis_changed_after_send."""
+    stmt = select(claim).where(claim.c.status.notin_(CLOSED_STATUSES))
+    if carrier_account_id is not None:
+        stmt = stmt.where(claim.c.carrier_account_id == carrier_account_id)
+    out: dict[str, list[uuid.UUID]] = {"stale": [], "changed_after_send": []}
+    for c in conn.execute(stmt.with_for_update()).all():
+        if not basis_changed(conn, c):
+            continue
+        if c.status in UNSENT_STATUSES:
+            if not c.stale_basis:
+                conn.execute(
+                    claim.update()
+                    .where(claim.c.id == c.id)
+                    .values(stale_basis=True, version=claim.c.version + 1, updated_at=func.now())
+                )
+            out["stale"].append(c.id)
+        else:
+            conn.execute(
+                claim.update()
+                .where(claim.c.id == c.id)
+                .values(
+                    basis_changed_after_send=True,
+                    basis_changed_after_send_at=func.coalesce(claim.c.basis_changed_after_send_at, func.now()),
+                    version=claim.c.version + 1,
+                    updated_at=func.now(),
+                )
+            )
+            out["changed_after_send"].append(c.id)
+    return out
+
+
+def merge_marked(*parts: dict[str, list[uuid.UUID]]) -> dict[str, list[uuid.UUID]]:
+    out: dict[str, list[uuid.UUID]] = {"stale": [], "changed_after_send": []}
+    for p in parts:
+        for k, ids in p.items():
+            out[k] += [i for i in ids if i not in out[k]]
+    return out
+
+
+# ------------------------------------------------------------------ deadline sweep (B1-002)
+
+
+def run_deadline_sweep(conn: Connection, run_date: date) -> dict[str, int]:
+    """Reminders at 30, 14 and 3 days (recorded once in `notification`; sending is a provider
+    interface not built in B1) and expiry of unsent claims past contest-by."""
+    rows = conn.execute(
+        select(claim.c.id, claim.c.status, claim.c.late_override_reason, invoice.c.contest_by)
+        .join(invoice, invoice.c.id == claim.c.invoice_id)
+        .where(claim.c.status.in_(UNSENT_STATUSES))
+    ).all()
+    sent = {(n.kind, str(n.entity_id)) for n in conn.execute(select(notification.c.kind, notification.c.entity_id)).all()}
+    actions = deadline_sweep(
+        [SweepClaim(str(r.id), r.status, r.contest_by, r.late_override_reason is not None) for r in rows], run_date, sent
+    )
+    t = conn.execute(select(tenant.c.id)).scalar_one()
+    counts = {"reminders": 0, "expired": 0}
+    for a in actions:
+        cid = uuid.UUID(a.claim_id)
+        if a.action == "remind":
+            conn.execute(
+                pg_insert(notification)
+                .values(tenant_id=t, kind=a.kind, entity_id=cid)
+                .on_conflict_do_nothing(index_elements=["tenant_id", "kind", "entity_id"])
+            )
+            counts["reminders"] += 1
+        else:
+            conn.execute(
+                pg_insert(claim_event)
+                .values(
+                    tenant_id=t, claim_id=cid, event_type="expired", occurred_on=run_date, client_event_id=f"sweep-{run_date}"
+                )
+                .on_conflict_do_nothing(index_elements=["claim_id", "client_event_id"])
+            )
+            refresh_claim_state(conn, cid)
+            audit(
+                conn,
+                tenant_id=t,
+                actor_user_id=None,
+                actor_role="worker",
+                action="claim.expired",
+                entity_type="claim",
+                entity_id=cid,
+            )
+            counts["expired"] += 1
+    return counts

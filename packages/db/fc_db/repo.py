@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-from sqlalchemy import Connection, Row, and_, or_, select
+from sqlalchemy import Connection, Row, and_, or_, select, text
 
 from fc_core.model import (
     DuplicateCandidate,
@@ -75,8 +75,29 @@ def load_invoice(conn: Connection, invoice_id: uuid.UUID) -> tuple[Invoice, Row[
         # reports DOCUMENT_MISSING rather than guessing.
         bol_accessorials=None,
         original_bill_receipt_date=None,
+        lane_key=inv.lane_key,
+        revision_chain=revision_chain(conn, inv.id),
     )
     return core_inv, inv, carrier
+
+
+def revision_chain(conn: Connection, invoice_id: uuid.UUID) -> frozenset[str]:
+    """Every invoice linked to this one through revision_of, in either direction (B1-006)."""
+    rows = conn.execute(
+        text(
+            """
+            WITH RECURSIVE chain(id) AS (
+              SELECT CAST(:i AS uuid)
+              UNION
+              SELECT inv.id FROM invoice inv JOIN chain c ON inv.revision_of = c.id OR inv.id = (
+                SELECT revision_of FROM invoice WHERE id = c.id)
+            )
+            SELECT id FROM chain WHERE id <> CAST(:i AS uuid)
+            """
+        ),
+        {"i": str(invoice_id)},
+    ).scalars()
+    return frozenset(str(r) for r in rows)
 
 
 def load_documents(conn: Connection, carrier_account_id: uuid.UUID) -> tuple[RateDocument, ...]:
@@ -103,6 +124,7 @@ def load_documents(conn: Connection, carrier_account_id: uuid.UUID) -> tuple[Rat
             scope_key=d.scope_key,
             rules=tuple(by_doc.get(d.id, [])),
             date_basis_source_page=d.date_basis_source_page,
+            revises_id=str(d.revises_id) if d.revises_id else None,
         )
         for d in docs
     )
@@ -110,15 +132,27 @@ def load_documents(conn: Connection, carrier_account_id: uuid.UUID) -> tuple[Rat
 
 def load_fuel_values(conn: Connection, carrier_account_id: uuid.UUID) -> tuple[FuelIndexValue, ...]:
     rows = conn.execute(
-        select(fuel_index_price).where(
+        select(fuel_index_price)
+        .where(
             or_(
                 fuel_index_price.c.carrier_account_id == carrier_account_id,
                 fuel_index_price.c.carrier_account_id.is_(None),
             )
         )
+        .order_by(fuel_index_price.c.published_on, fuel_index_price.c.revision, fuel_index_price.c.id)
     ).all()
     return tuple(
-        FuelIndexValue(str(r.id), r.index_name, r.published_on, r.week_start, r.price, r.status, r.revision) for r in rows
+        FuelIndexValue(
+            str(r.id),
+            r.index_name,
+            r.published_on,
+            r.week_start,
+            r.price,
+            r.status,
+            r.revision,
+            carrier_specific=r.carrier_account_id is not None,
+        )
+        for r in rows
     )
 
 
@@ -134,7 +168,13 @@ def load_duplicate_candidates(conn: Connection, inv: Row[Any]) -> tuple[Duplicat
     # B1: the AP payment import (ap_payment) is not built; only invoice history is compared.
     return tuple(
         DuplicateCandidate(
-            f"invoice:{r.id}", carrier_key(r.carrier_name), r.invoice_number, r.pro_number, r.invoice_date, r.total_cents
+            f"invoice:{r.id}",
+            carrier_key(r.carrier_name),
+            r.invoice_number,
+            r.pro_number,
+            r.invoice_date,
+            r.total_cents,
+            invoice_id=str(r.id),
         )
         for r in rows
     )

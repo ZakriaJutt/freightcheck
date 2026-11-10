@@ -19,6 +19,7 @@ from sqlalchemy import Connection, Engine, func, select, text
 from fc_db import ops
 from fc_db.repo import NotFound
 from fc_db.tables import job
+from fc_platform.clock import today
 from fc_platform.db import engine_for
 from fc_platform.logging import configure_logging, correlation_id, log, tenant_id_var
 from fc_platform.settings import get_settings
@@ -38,9 +39,20 @@ def _fee_statement(conn: Connection, payload: dict[str, Any]) -> dict[str, Any]:
     return {"fee_statement_id": str(sid) if sid else None}
 
 
+def _deadline_sweep(conn: Connection, payload: dict[str, Any]) -> dict[str, Any]:
+    return ops.run_deadline_sweep(conn, date.fromisoformat(payload["run_date"]))
+
+
+def enqueue_daily_sweeps(engine: Engine, run_date: date) -> int:
+    """One deadline_sweep job per tenant per run date; idempotent (B1-002)."""
+    with engine.begin() as conn:
+        return int(conn.execute(text("select fc_enqueue_deadline_sweeps(:d)"), {"d": run_date}).scalar_one())
+
+
 HANDLERS: dict[str, Callable[[Connection, dict[str, Any]], dict[str, Any]]] = {
     "run_checks": _run_checks,
     "build_fee_statement": _fee_statement,
+    "deadline_sweep": _deadline_sweep,
 }
 
 
@@ -73,7 +85,7 @@ def process_one(engine: Engine) -> uuid.UUID | None:
                 "job.done",
                 job_id=str(job_id),
                 kind=row.kind,
-                **{k: v for k, v in result.items() if k.endswith("_id") or k == "run_no"},
+                **{k: v for k, v in result.items() if k.endswith("_id") or k in ("run_no", "reminders", "expired")},
             )
         except Exception as exc:  # noqa: BLE001 - recorded on the job row, never swallowed silently
             permanent = isinstance(exc, NotFound)
@@ -112,6 +124,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="fc-worker")
     parser.add_argument("--once", action="store_true", help="process jobs until the queue is empty, then exit")
     parser.add_argument("--poll-seconds", type=float, default=1.0)
+    parser.add_argument("--sweep", action="store_true", help="enqueue today's deadline sweep for every tenant first")
     args = parser.parse_args(argv)
     settings = get_settings()
     configure_logging(settings.log_level)
@@ -119,10 +132,16 @@ def main(argv: list[str] | None = None) -> int:
     with engine.connect() as conn:
         conn.execute(text("select 1"))
     log(logger, "worker.ready")
+    if args.sweep:
+        enqueue_daily_sweeps(engine, today())
     if args.once:
         run_until_idle(engine)
         return 0
+    swept_on = None
     while True:  # pragma: no cover - long-running loop
+        if swept_on != today():
+            enqueue_daily_sweeps(engine, today())
+            swept_on = today()
         if process_one(engine) is None:
             time.sleep(args.poll_seconds)
 
