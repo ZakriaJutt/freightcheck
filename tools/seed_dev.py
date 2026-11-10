@@ -1,14 +1,17 @@
 """Seed one synthetic tenant with an Approver session for local use (idempotent).
 
-B1 has no sign-in endpoints (T-2.2.3 not built); this writes a dev-only session and prints
-its cookie value. Synthetic names only. Refuses to run outside FC_ENV=dev.
+B1 has no sign-in endpoints (T-2.2.3 not built); this writes a dev-only session and stores
+its cookie in the git-ignored `.local/dev-session.txt` (mode 0600). It prints the value only
+with `--print-session` (B1-012). Synthetic names only. Refuses to run outside FC_ENV=dev.
 """
 
 from __future__ import annotations
 
 import hashlib
 import secrets
+import sys
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 from sqlalchemy import create_engine, select
 
@@ -44,7 +47,15 @@ def main() -> None:
                 expires_at=datetime.now(UTC) + timedelta(hours=12),
             )
         )
-    print(f"dev session cookie: fc_session={token}")
+    out = Path(__file__).resolve().parents[1] / ".local" / "dev-session.txt"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.touch(mode=0o600, exist_ok=True)
+    out.chmod(0o600)
+    out.write_text(f"fc_session={token}\n")
+    if "--print-session" in sys.argv:
+        print(f"dev session cookie: fc_session={token}")
+    else:
+        print(f"dev session cookie written to {out.relative_to(out.parents[1])}")
 
 
 if __name__ == "__main__":
