@@ -61,6 +61,8 @@ class RateDocument:
     scope_key: str = "*"
     rules: tuple[RateRule, ...] = ()
     date_basis_source_page: int | None = None
+    # Set on a revision of another document; an entered revision does not block its confirmed prior.
+    revises_id: str | None = None
 
     def rules_of(self, rule_type: str) -> list[RateRule]:
         return [r for r in self.rules if r.rule_type == rule_type]
@@ -75,6 +77,7 @@ class FuelIndexValue:
     price: Decimal
     status: DocStatus
     revision: int = 1
+    carrier_specific: bool = False  # False = shared within the tenant
 
 
 @dataclass(frozen=True)
@@ -95,6 +98,7 @@ class DuplicateCandidate:
     pro_number: str | None
     invoice_date: date | None
     total_cents: int | None
+    invoice_id: str | None = None  # set for invoice rows; compared with the revision chain
 
 
 @dataclass(frozen=True)
@@ -116,6 +120,11 @@ class Invoice:
     bol_accessorials: frozenset[str] | None = None
     # Receipt of the original bill when this invoice is an additional or balance-due bill.
     original_bill_receipt_date: date | None = None
+    # Lane group the shipment belongs to; selects lane-scoped documents. None = unknown.
+    lane_key: str | None = None
+    # Ids of every invoice in this invoice's correction chain (revision_of links), itself excluded.
+    # A carrier's corrected invoice supersedes its original; it is never its duplicate.
+    revision_chain: frozenset[str] = frozenset()
 
     def date_for(self, basis: DateBasis) -> date | None:
         value: date | None = getattr(self, basis)

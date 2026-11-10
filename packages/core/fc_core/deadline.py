@@ -9,7 +9,7 @@ no deadline. Calendar arithmetic is exact (date + days).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 from typing import Literal
 
@@ -37,6 +37,7 @@ class DeadlineInput:
     evidence: ReceiptEvidence
     contract_term_days: int | None = None
     contract_term_has_source: bool = False
+    today: date | None = None  # passed in by the caller; the core reads no clock
 
 
 @dataclass(frozen=True)
@@ -47,9 +48,19 @@ class Deadline:
     receipt_basis: ReceiptBasis
     receipt_note: str | None = None
     exception_code: str | None = None
+    # Evidence dates refused as impossible (B1-008): later than today or than the forward's arrival.
+    rejected_evidence: tuple[str, ...] = ()
 
 
-def earliest_receipt(ev: ReceiptEvidence) -> tuple[date | None, ReceiptBasis, str | None]:
+def receipt_upper_bound(ev: ReceiptEvidence, today: date | None) -> date | None:
+    """The shipper cannot have received the bill after today, nor after it forwarded it to us."""
+    bounds = [d for d in (today, ev.freightcheck_received_at.date() if ev.freightcheck_received_at else None) if d]
+    return min(bounds) if bounds else None
+
+
+def earliest_receipt(
+    ev: ReceiptEvidence, upper: date | None = None
+) -> tuple[date | None, ReceiptBasis, str | None, tuple[str, ...]]:
     options: list[tuple[date, ReceiptBasis, str | None]] = []
     if ev.carrier_transmission_on is not None:
         options.append((ev.carrier_transmission_on, "carrier_transmission", None))
@@ -59,15 +70,24 @@ def earliest_receipt(ev: ReceiptEvidence) -> tuple[date | None, ReceiptBasis, st
         if not (ev.user_note and ev.user_note.strip()):
             raise ValueError("a user-entered receipt date needs a note")
         options.append((ev.user_entered_on, "user_entered", ev.user_note))
+    rejected = tuple(f"{b}:{d.isoformat()}" for d, b, _ in options if upper is not None and d > upper)
+    options = [o for o in options if upper is None or o[0] <= upper]
     if not options:
-        return None, "unknown", None
+        return None, "unknown", None, rejected
     order = {"carrier_transmission": 0, "ap_received_stamp": 1, "user_entered": 2}
     when, basis, note = min(options, key=lambda o: (o[0], order[o[1]]))
-    return when, basis, note
+    return when, basis, note, rejected
 
 
 def compute_deadline(inp: DeadlineInput) -> Deadline:
-    receipt, receipt_basis, note = earliest_receipt(inp.evidence)
+    """Impossible evidence dates are dropped and listed in `rejected_evidence`; callers refuse them."""
+    upper = receipt_upper_bound(inp.evidence, inp.today)
+    receipt, receipt_basis, note, rejected = earliest_receipt(inp.evidence, upper)
+    d = _deadline_from(inp, receipt, receipt_basis, note)
+    return replace(d, rejected_evidence=rejected) if rejected else d
+
+
+def _deadline_from(inp: DeadlineInput, receipt: date | None, receipt_basis: ReceiptBasis, note: str | None) -> Deadline:
     has_term = inp.contract_term_days is not None and inp.contract_term_has_source
     if inp.carrier_type == "broker" and not has_term:
         return Deadline(None, "none_broker", receipt, receipt_basis, note)
@@ -99,6 +119,9 @@ class SweepClaim:
     claim_id: str
     status: str
     contest_by: date | None
+    # An Approver recorded a late override at approval; the claim is not expired by the sweep
+    # (the send step still requires its own recorded override, B1-002).
+    override_recorded: bool = False
 
 
 @dataclass(frozen=True)
@@ -119,7 +142,8 @@ def deadline_sweep(claims: list[SweepClaim], today: date, already_sent: set[tupl
             continue
         left = days_left(c.contest_by, today)
         if left < 0:
-            actions.append(SweepAction(c.claim_id, "expire"))
+            if not (c.override_recorded and c.status == "approved"):
+                actions.append(SweepAction(c.claim_id, "expire"))
             continue
         for threshold in REMINDER_DAYS:
             kind = f"deadline_{threshold}"

@@ -111,7 +111,8 @@ def derive(events: list[ClaimEvent], claimed_cents: int | None, settled_cents: i
         return Derived("approved" if last == "approved" else "draft", None)
     accepted = _accepted(evs, claimed_cents)
     decisions = [e for e in evs if e.event_type in DECISION_EVENTS]
-    if settled_cents > 0 and (accepted is None or settled_cents >= accepted):
+    # B1-007: "settled" needs a carrier decision accepting money and settlements covering it.
+    if accepted is not None and accepted > 0 and settled_cents >= accepted:
         return Derived("settled", accepted)
     if decisions:
         latest = max(decisions, key=lambda e: (e.occurred_on, e.seq))
@@ -127,9 +128,20 @@ def _accepted(evs: list[ClaimEvent], claimed_cents: int | None) -> int | None:
     latest = max(decisions, key=lambda e: (e.occurred_on, e.seq))
     if latest.event_type == "decision_denied":
         return 0
-    if latest.event_type == "decision_partial":
-        return latest.amount_cents
-    return latest.amount_cents if latest.amount_cents is not None else claimed_cents
+    amount = latest.amount_cents if latest.amount_cents is not None else claimed_cents
+    if latest.event_type == "decision_accepted" and latest.amount_cents is None:
+        amount = claimed_cents
+    # B1-007: accepted never exceeds claimed (the API refuses it; this is the backstop).
+    if amount is not None and claimed_cents is not None:
+        amount = min(amount, claimed_cents)
+    return amount
+
+
+def settlement_cap(claimed_cents: int | None, accepted_cents: int | None) -> int | None:
+    """Most that settlements may total without a recorded excess reason (B1-007)."""
+    if accepted_cents is not None:
+        return accepted_cents
+    return claimed_cents
 
 
 # ---------------------------------------------------------------- approval

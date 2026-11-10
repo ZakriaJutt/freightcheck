@@ -44,7 +44,8 @@ class TestUT02Resolver:
     docs = (
         contract_v(2, effective_from=date(2026, 1, 1), effective_to=date(2026, 6, 30)),
         contract_v(3, effective_from=date(2026, 7, 1), effective_to=None, rate="40.00"),
-        contract_v(4, status="entered", effective_from=date(2026, 6, 1), effective_to=None, rate="99.00"),
+        # v4 is an entered revision of v3: v3 governs until v4 is confirmed.
+        contract_v(4, status="entered", effective_from=date(2026, 6, 1), effective_to=None, rate="99.00", revises_id="rs-v3"),
     )
 
     @pytest.mark.parametrize(("pickup", "expected"), [(date(2026, 6, 30), 2), (date(2026, 7, 1), 3)])

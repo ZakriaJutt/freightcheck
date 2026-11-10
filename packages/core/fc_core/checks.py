@@ -31,6 +31,7 @@ from fc_core.model import (
     BasisRef,
     CheckResult,
     CheckStatus,
+    FuelIndexValue,
     Invoice,
     InvoiceStatus,
     RateDocument,
@@ -39,7 +40,7 @@ from fc_core.model import (
     basis_of,
 )
 from fc_core.money import HUNDRED, dollars_to_cents, percent_of_cents, to_decimal
-from fc_core.resolver import Resolved, Unresolved, resolve, resolve_linehaul
+from fc_core.resolver import Resolved, Unresolved, resolve, resolve_linehaul, scope_for
 
 ENGINE_VERSION = "core-1.0.0"
 
@@ -252,7 +253,7 @@ def check_fuel(invoice: Invoice, ctx: RunContext) -> list[CheckResult]:
     if not fuel_lines:
         return [CheckResult("C-03", "not_applicable")]
     line_no = fuel_lines[0].line_no
-    resolution = resolve(ctx.documents, "fuel_schedule", invoice)
+    resolution = resolve(ctx.documents, "fuel_schedule", invoice, scope_for(invoice))
     if isinstance(resolution, Unresolved):
         return [_exception("C-03", resolution.exception_code, resolution.detail, line_no=line_no)]
     doc, gd = resolution.document, resolution.governing_date
@@ -276,21 +277,11 @@ def check_fuel(invoice: Invoice, ctx: RunContext) -> list[CheckResult]:
         and earliest <= v.published_on <= latest
         and v.published_on.weekday() == wr["published_weekday"]
     ]
-    confirmed = [v for v in window if v.status == "confirmed"]
-    if not confirmed:
-        code = "INDEX_PRICE_UNCONFIRMED" if any(v.status == "entered" for v in window) else "INDEX_PRICE_MISSING"
-        return [
-            _exception(
-                "C-03",
-                code,
-                f"{index_name} value published {earliest}..{latest}",
-                basis=basis,
-                **common,
-            )
-        ]
-    if len({v.published_on for v in confirmed}) > 1:
-        return [_exception("C-03", "FSC_BASIS_MISSING", "week rule selects more than one value", basis=basis, **common)]
-    value = max(confirmed, key=lambda v: v.revision)
+    picked = select_fuel_value(window)
+    if isinstance(picked, tuple):
+        code, detail = picked
+        return [_exception("C-03", code, f"{index_name} {earliest}..{latest}: {detail}", basis=basis, **common)]
+    value = picked
     bands = [
         r
         for r in doc.rules_of("fuel_band")
@@ -311,13 +302,22 @@ def check_fuel(invoice: Invoice, ctx: RunContext) -> list[CheckResult]:
     band = bands[0]
     pct = to_decimal(band.params["percent"])
     lh = linehaul_expectation(invoice, ctx)
-    if isinstance(lh, LinehaulExpectation) and lh.expected_cents is not None:
-        base = lh.expected_cents
-        base_source = "expected_linehaul"
-        fuel_basis = fuel_basis.merge(basis_of(lh.document))
-    else:
-        base = _billed_net_linehaul(invoice)
-        base_source = "billed_linehaul"
+    if not isinstance(lh, LinehaulExpectation) or lh.expected_cents is None:
+        # B1-003: without an expected linehaul there is no defensible fuel base; the billed
+        # linehaul may be typed elsewhere or the schedule may apply fuel to gross. Fail closed.
+        return [
+            _exception(
+                "C-03",
+                "FSC_BASIS_MISSING",
+                "linehaul base unavailable (linehaul check has no expected amount)",
+                basis=fuel_basis,
+                fuel_index_price_id=value.id,
+                **common,
+            )
+        ]
+    base = lh.expected_cents
+    base_source = "expected_linehaul"
+    fuel_basis = fuel_basis.merge(basis_of(lh.document))
     expected = percent_of_cents(base, pct)
     billed = sum(ln.amount_cents for ln in fuel_lines)
     return [
@@ -347,6 +347,36 @@ def check_fuel(invoice: Invoice, ctx: RunContext) -> list[CheckResult]:
     ]
 
 
+def select_fuel_value(window: list[FuelIndexValue]) -> FuelIndexValue | tuple[str, str]:
+    """Pick the index value the week rule selects, deterministically (B1-005).
+
+    Precedence: only confirmed values count; one publication date only; within a level
+    (carrier-specific or tenant-wide) the database allows one confirmed value per index and
+    week; a carrier-specific value is preferred to the tenant-wide one when both agree, and
+    when they disagree nothing is chosen. An entered value at a level with no confirmed value
+    (and not a correction of one) may govern, so it blocks the check.
+    """
+    confirmed = [v for v in window if v.status == "confirmed"]
+    if not confirmed:
+        code = "INDEX_PRICE_UNCONFIRMED" if any(v.status == "entered" for v in window) else "INDEX_PRICE_MISSING"
+        return code, "no confirmed value"
+    if len({v.published_on for v in confirmed}) > 1:
+        return "FSC_BASIS_MISSING", "week rule selects more than one publication"
+    by_level: dict[bool, list[FuelIndexValue]] = {True: [], False: []}
+    for v in confirmed:
+        by_level[v.carrier_specific].append(v)
+    for level, vals in by_level.items():
+        if len(vals) > 1:
+            return "FSC_BASIS_MISSING", f"{len(vals)} confirmed values at one level"
+        pending = [v for v in window if v.status == "entered" and v.carrier_specific == level and v.revision == 1]
+        if not vals and pending and by_level[not level]:
+            return "INDEX_PRICE_UNCONFIRMED", "an unconfirmed value may govern"
+    carrier, shared = by_level[True], by_level[False]
+    if carrier and shared and carrier[0].price != shared[0].price:
+        return "FSC_BASIS_MISSING", f"carrier value {carrier[0].price} and tenant value {shared[0].price} disagree"
+    return carrier[0] if carrier else shared[0]
+
+
 # ---------------------------------------------------------------- C-04 accessorials
 
 
@@ -354,7 +384,7 @@ def check_accessorials(invoice: Invoice, ctx: RunContext) -> list[CheckResult]:
     lines = invoice.lines_of("accessorial")
     if not lines:
         return [CheckResult("C-04", "not_applicable")]
-    resolution = resolve(ctx.documents, "accessorial_schedule", invoice)
+    resolution = resolve(ctx.documents, "accessorial_schedule", invoice, scope_for(invoice))
     out: list[CheckResult] = []
     for ln in lines:
         if isinstance(resolution, Unresolved):
@@ -407,6 +437,8 @@ def check_accessorials(invoice: Invoice, ctx: RunContext) -> list[CheckResult]:
 def check_duplicates(invoice: Invoice, ctx: RunContext) -> list[CheckResult]:
     matches: list[dict[str, str]] = []
     for c in ctx.duplicate_candidates:
+        if c.invoice_id is not None and (c.invoice_id == invoice.id or c.invoice_id in invoice.revision_chain):
+            continue  # B1-006: a corrected invoice supersedes its original; not a duplicate
         same_carrier = c.carrier_key == invoice.carrier_key
         reason = None
         if same_carrier and c.invoice_number and c.invoice_number == invoice.invoice_number:
@@ -424,14 +456,15 @@ def check_duplicates(invoice: Invoice, ctx: RunContext) -> list[CheckResult]:
             matches.append({"match": c.ref, "reason": reason})
     if not matches:
         return [CheckResult("C-01", "pass")]
+    # B1-006: a possible duplicate is a question for a person shown side by side (MH-05). It
+    # carries no claimable amount: what was paid twice is not known until the AP import exists.
     return [
         CheckResult(
             "C-01",
             "variance",
-            expected_cents=0,
             billed_cents=invoice.total_cents,
-            variance_cents=invoice.total_cents,
-            arithmetic={"candidates": matches},
+            review_flags=("possible_duplicate",),
+            arithmetic={"candidates": matches, "question": "possible duplicate; compare side by side"},
         )
     ]
 

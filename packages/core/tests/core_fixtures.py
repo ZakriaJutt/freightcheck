@@ -18,6 +18,7 @@ def contract_v(
     effective_to: date | None = date(2026, 6, 30),
     rate: str = "38.50",
     doc_id: str | None = None,
+    revises_id: str | None = None,
 ) -> RateDocument:
     did = doc_id or f"rs-v{revision}"
     return RateDocument(
@@ -33,6 +34,7 @@ def contract_v(
             RateRule(f"{did}-disc", "discount", {"percent": "62"}),
             RateRule(f"{did}-min", "minimum", {"amount": "145.00"}),
         ),
+        revises_id=revises_id,
     )
 
 
