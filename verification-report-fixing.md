@@ -5,7 +5,7 @@
 | Item | Status |
 |---|---|
 | Documents | Ten files written by Author A on 2026-11-10 |
-| Application | Does not exist. Every application check below is `Not run` |
+| Application | Build milestone B1 on branch `feat/b1-foundation` (2026-11-11), not pushed, not independently reviewed. Results in [section 9](#9-build-milestone-b1-2026-11-11); every check not listed there as passed stays `Not run` |
 | Independent review | Round 1 done on 2026-11-10: 17 findings (0 blocker, 12 major, 5 minor). Fixes recorded in section 6. Retest on 2026-11-10 (`freightcheck-round2.md`): 13 closed, 0 still open, 4 open by design (F-004, F-005, F-009, F-017), no new findings; verdicts transcribed into section 6 by the lead |
 | Customer evidence | None. No interview, audit, message or payment |
 | Highest-consequence failure | **Wrong-basis dispute sent** ([PRD.md](PRD.md#11-highest-cost-user-mistakes)) |
@@ -28,13 +28,13 @@ Done by the author with a scratch script kept outside the repository, and by rea
 
 ## 3. Application checks planned for future implementation
 
-All `Not run`. Definitions: [execution-plan.md](execution-plan.md#7-test-catalogue).
+Definitions: [execution-plan.md](execution-plan.md#7-test-catalogue). B1 results per ID are in [section 9](#9-build-milestone-b1-2026-11-11).
 
 | Group | IDs | Status |
 |---|---|---|
-| Unit | UT-01 to UT-15 | Not run |
-| Integration | IT-01 to IT-22 | Not run |
-| End-to-end | E2E-01 to E2E-08 | Not run |
+| Unit | UT-01 to UT-15 | B1: UT-01 to UT-11, UT-13, UT-15 passed; UT-12, UT-14 Not run |
+| Integration | IT-01 to IT-22 | B1: IT-01, IT-06, IT-07, IT-08, IT-13, IT-16, IT-19, IT-20 passed; IT-17 partly (single head only); others Not run |
+| End-to-end | E2E-01 to E2E-08 | Not run in a browser. E2E-02 passed in an API-level form only |
 | Manual accessibility checks | [design.md](design.md#7-accessibility-map) | Not run |
 | Security checks against the ASVS list | [TRD.md](TRD.md#84-security-controls-and-accepted-gaps) | Not run |
 | Quality targets | [TRD.md](TRD.md#10-quality-requirements) | Not run |
@@ -65,19 +65,19 @@ Single home of the register. Numbering follows the specification.
 
 | ID | Impact on this buyer and data | Prevention | Detection signal | Test and expected outcome | Task |
 |---|---|---|---|---|---|
-| R-01 | A re-delivered inbound email or a late-entered carrier acknowledgment moves a claim back from "partly accepted" to "acknowledged", or re-runs extraction over fields a clerk already confirmed | Status derived from events (AD-09); versioned job transitions | Count of refused transitions | UT-09: late event does not regress; IT-03: one message from duplicate deliveries | T-3.1.3 |
+| R-01 | A re-delivered inbound email or a late-entered carrier acknowledgment moves a claim back from "partly accepted" to "acknowledged", or re-runs extraction over fields a clerk already confirmed | Status derived from events (AD-09); versioned job transitions | Count of refused transitions | UT-09: late event does not regress; IT-03: one message from duplicate deliveries B1 2026-11-11: UT-09 passed (late acknowledgment and duplicate decision do not regress); IT-03 Not run. | T-3.1.3 |
 | R-02 | Approve or upload times out at the proxy while the server finishes; the Approver clicks again and the carrier ledger shows two approvals or two invoices | `Idempotency-Key` on every creating POST; stored results | Idempotent replays per day | IT-04: retry returns the first result, one file | T-3.1.3 |
 | R-03 | A second rounding or deadline helper outside `packages/core` makes the ledger total differ from the report by cents and a contest-by date differ between screens | Core owns money, dates, NSV; boundary lint | Lint failure; search for decimal rounding outside core | `make check-boundaries` (proposed) fails on a planted duplicate helper | T-2.1.1 |
-| R-04 | Web or worker imports API internals, so a change to authorization code breaks the packet job unnoticed | Enforced import rules (AD-11) | Lint failure | Planted forbidden import fails CI | T-2.1.1 |
-| R-05 | One shipper's contract rates or invoices are readable by another shipper through an API ID, a worker job or a file link | RLS plus one tenant context module; tenant-prefixed keys (AD-06) | Failed-authorization log entries; RLS-empty anomalies | IT-01: 404 or no rows on every path | T-2.2.2 |
+| R-04 | Web or worker imports API internals, so a change to authorization code breaks the packet job unnoticed | Enforced import rules (AD-11) | Lint failure | Planted forbidden import fails CI B1 2026-11-11: `tools/test_check_boundaries.py` passed (planted forbidden imports reported); `make check-boundaries` 0 violations. Not yet wired into CI. | T-2.1.1 |
+| R-05 | One shipper's contract rates or invoices are readable by another shipper through an API ID, a worker job or a file link | RLS plus one tenant context module; tenant-prefixed keys (AD-06) | Failed-authorization log entries; RLS-empty anomalies | IT-01: 404 or no rows on every path B1 2026-11-11: IT-01 passed (API 404 on 12 foreign-id requests, worker job fails closed, signed link bound to key, zero rows without tenant context, cross-tenant insert refused by RLS). | T-2.2.2 |
 | R-06 | Worker runs with its own copy of tolerance or public URL settings, so checks disagree with what the screen says | One settings module in `packages/platform` | Settings hash logged at start by api and worker differs | IT-13: hashes equal | T-2.1.4 |
-| R-07 | Worker crashes at start on a web-only import; intake stalls silently while 180-day windows run | Worker image without web packages; shared logger | Worker heartbeat missing; queue age alert | IT-13: worker starts and runs a job | T-2.1.4 |
-| R-08 | The no-overlap constraint on rate documents exists in a migration but not in the models; a rebuilt environment accepts two governing versions and produces a wrong-basis claim | Parity check in CI | Parity job fails | IT-08: no drift | T-2.2.1 |
+| R-07 | Worker crashes at start on a web-only import; intake stalls silently while 180-day windows run | Worker image without web packages; shared logger | Worker heartbeat missing; queue age alert | IT-13: worker starts and runs a job B1 2026-11-11: IT-13 passed with web modules blocked at import, not with a separate image. | T-2.1.4 |
+| R-08 | The no-overlap constraint on rate documents exists in a migration but not in the models; a rebuilt environment accepts two governing versions and produces a wrong-basis claim | Parity check in CI | Parity job fails | IT-08: no drift B1 2026-11-11: IT-08 passed (no column/index/FK drift; check and exclusion constraints and forced RLS match the models). | T-2.2.1 |
 | R-09 | A backfill of contest-by dates stops halfway; half the invoices show no deadline | Resumable backfills with a progress row | Progress row not complete | IT-09: restart completes, no row twice | T-2.2.1 |
-| R-10 | Two branches add migrations; deploy order differs between staging and production and the claim tables diverge | Single linear head enforced | CI two-heads failure | IT-17: fails on two heads | T-2.2.1 |
+| R-10 | Two branches add migrations; deploy order differs between staging and production and the claim tables diverge | Single linear head enforced | CI two-heads failure | IT-17: fails on two heads B1 2026-11-11: single-head assertion passed; the two-branch CI case of IT-17 Not run. | T-2.2.1 |
 | R-11 | Building an index on `invoice` or `check_result` locks intake during a deploy in business hours | Concurrent builds, lock timeout, `NOT VALID` then validate | Lock-wait metrics during deploy | IT-17: plain index on a populated table fails CI | T-2.2.1 |
-| R-12 | A wrong claim cannot be traced back to its extraction and rule because the correlation ID stops at the queue; or contract rates appear in logs | ID carried in job rows and provider calls; logs hold IDs only | Log lines without correlation ID; pattern scan for amounts | IT-13: ID present end to end, no amounts | T-2.1.4 |
-| R-13 | Two shippers upload `invoice.pdf`; one overwrites the other and a dispute packet carries another shipper's invoice | Generated keys with tenant, purpose, source and UUID; unique `storage_key` | Unique violation count | UT-13: keys differ and contain no user filename | T-2.2.5 |
+| R-12 | A wrong claim cannot be traced back to its extraction and rule because the correlation ID stops at the queue; or contract rates appear in logs | ID carried in job rows and provider calls; logs hold IDs only | Log lines without correlation ID; pattern scan for amounts | IT-13: ID present end to end, no amounts B1 2026-11-11: IT-13 passed (request correlation ID on the worker's job lines; no amount fields in logs). | T-2.1.4 |
+| R-13 | Two shippers upload `invoice.pdf`; one overwrites the other and a dispute packet carries another shipper's invoice | Generated keys with tenant, purpose, source and UUID; unique `storage_key` | Unique violation count | UT-13: keys differ and contain no user filename B1 2026-11-11: UT-13 passed. | T-2.2.5 |
 | R-14 | Lookback files from a prospect that never signed remain after the promised 30 days, in Phase 0 in the founder's data room and later in the application | Phase 0: data-handling sheet and weekly deletion check (T-0.1.6, T-0.3.5). Application: `expires_at` and retention sweep | Sheet rows past their delete-by date; count of rows past expiry | Phase 0: deletion log matches the sheet. IT-10: expired objects and rows gone | T-3.2.3 |
 | R-15 | Recreating the database container on the single VPS loses every claim, decision and settlement record | Named volume; WAL archive; restore drill | Backup-missing alert; volume check at start | IT-18: rows survive recreation; IT-12: restore within target | T-2.1.2 |
 | R-16 | Evidence links in a packet or export point at `localhost` or a container name and fail for the Approver | `PUBLIC_BASE_URL` in one builder | Link host check in smoke test | IT-11: host equals the public URL | T-2.2.5 |
@@ -162,3 +162,93 @@ Items documents cannot close.
 | Blocked sources: Supply Chain 24/7 article, ThomasNet, IMA membership page | Manual browsing | Error-rate claim; list building |
 | ASVS items stated as not met: V6.4.4, V13.3.1, V6.3.3 at L3, V8.4.2, V8.2.4 | Later phase | Security posture beyond pilot |
 | Page-image viewer has no text alternative for scans | Later phase | Accessibility for blind reviewers |
+
+## 9. Build milestone B1 (2026-11-11)
+
+**Authorisation.** On 2026-11-11 the owner authorised implementation in all ten repositories at once, before this product's Phase 0 sales gate (T-0.5.2, week 10) has passed. The decision text in Decision.md is unchanged; the gate itself is still open.
+
+**Environment.** Python 3.12 venv at `.venv`; PostgreSQL 16 on localhost, databases `freightcheck_dev` and `freightcheck_test`; application role `freightcheck_app` (NOSUPERUSER, NOBYPASSRLS) used by the API, the worker and every isolation test; every tenant table has ENABLE and FORCE ROW LEVEL SECURITY. API port 8102. Redis (index 1 assigned) is not used: the TRD keeps the queue in Postgres (AD-05). No frontend was built (port 3102 unused). Docker is not available, so the Compose stack (T-2.1.2) stays proposed and `make dev` starts the services directly.
+
+**Tasks implemented** (B1 subsets where marked):
+
+| Task | What exists |
+|---|---|
+| T-2.1.1 | Layout `apps/api`, `apps/worker`, `packages/core`, `packages/db`, `packages/platform`; `tools/check_boundaries.py` with a planted-violation test. CI wiring and code-owners note not done |
+| T-2.1.2 (adapted) | `make dev`: role bootstrap, migrate, seed a synthetic tenant, API and worker, wait for `/readyz`; exits non-zero naming the failed service. Compose, MinIO, ClamAV proposed |
+| T-2.1.4 | Typed settings (unknown or missing `FC_*` keys stop startup), JSON logs with correlation ID from request to job, worker without web modules |
+| T-2.2.1 (subset) | Migration `0001` for 22 tables of schema.md needed by the core; exclusion constraint on confirmed rate documents; parity test. Backfill runner and concurrent-index check not built |
+| T-2.2.2 | RLS policies on every tenant table, forced; one tenant context module used by API and worker; `fc_claim_next_job` for the worker |
+| T-2.2.4 | Audit rows in the same transaction as the change; rollback test |
+| T-2.2.5 | Storage key function, signed URL with `PUBLIC_BASE_URL`, fake local storage and fake scanner |
+| T-3.1.3 (subset) | Job table, worker loop, idempotency keys for jobs; `Idempotency-Key` on every API POST with stored replay |
+| T-4.1.1, T-4.1.2 (API subset) | Rate documents with date basis, rules, per-document confirmation, revisions, overlap refusal naming the revision, supersede, marking of dependent claims; fuel index values with confirmation and corrections as revisions |
+| T-4.1.3 | Governing-rate resolver |
+| T-4.2.1 to T-4.2.5 | Check registry and runner, exception codes, invoice roll-up; C-02 with base-tariff case; C-07; C-03; C-04 amount and support question; C-01 against invoice history |
+| T-4.2.6 (part) | C-08 late-rebill question only; C-05 and C-06 not built |
+| T-4.2.7 (core) | Contest-by calculator with receipt evidence order, proxy, contract term, broker case; sweep logic (UT-15). The daily sweep job and reminder sending are not built |
+| T-5.1.3 | Approve with recompute, stale-basis and contest-by guards with override; send record; basis-changed-after-send flag, banner and withdrawal note; redraft. BCC capture not built |
+| T-5.1.4 (API subset) | Events with reason codes, settlements with required document, reversal, derived status, claim origin |
+| T-5.2.2, T-5.2.3 (core and job only) | NSV and gainshare arithmetic; fee statement job with reversal lines. Report screen, AP-credit reconciliation (IT-21) not built |
+
+**Test results.** All run on 2026-11-11 from a clean test database.
+
+| Command | Result |
+|---|---|
+| `make test-db` (drops and re-creates schema `public` of `freightcheck_test`, migrates to `0001`) | OK |
+| `make test-unit` (`packages/core/tests`, `packages/platform/tests`, `tools`) | 47 passed, 0 failed |
+| `make test-int` (`apps/api/tests`, real Postgres, app role, fake providers) | 26 passed, 0 failed |
+| `make lint` (ruff check and format check) | Passed |
+| `make typecheck` (mypy; `fc_core` strict) | Passed, 29 source files |
+| `make check-boundaries` | 0 violations |
+| `DEV_SMOKE=1 tools/dev.sh` | API ready on 8102, worker started |
+
+| Test ID | Test (file) | Result |
+|---|---|---|
+| UT-01 | `test_ut01_*` (`packages/core/tests/test_checks.py`) | Passed: 175.56 expected, 27.72 variance, identical over 1,000 runs |
+| UT-02 | `TestUT02Resolver` | Passed |
+| UT-03 | `TestUT03Fuel` | Passed: 14 Mar uses 3.78 (50.03, 12.99); 9 Mar uses 3.74 (49.16, 13.86); missing, unconfirmed, no week rule each an exception while linehaul still varies |
+| UT-04 | `test_ut04_*` | Passed |
+| UT-05 | `test_ut05_*` | Passed |
+| UT-06 | `test_ut06_*` (3 tests) | Passed, including a crashing check recorded as `ENGINE_ERROR` |
+| UT-07 | `TestUT07Deadlines` (`test_deadline_ledger.py`) | Passed (a)-(f), plus user note and missing invoice date |
+| UT-08 | `test_ut08_*` | Passed |
+| UT-09 | `test_ut09_*` | Passed |
+| UT-10 | `test_ut10_*` | Passed: time 393.33, NSV 1,557.67, fees 30.35, reversal −6.35 |
+| UT-11 | `test_ut11_*` | Passed: 226 days; arithmetic 1.00 shown as pass |
+| UT-13 | `packages/platform/tests/test_storage_keys.py` | Passed |
+| UT-15 | `TestUT15Sweep` | Passed (sweep logic; the job is not built) |
+| IT-01 | `apps/api/tests/test_isolation.py` (5 tests) | Passed |
+| IT-06 | `test_it06_*` (`test_core_path.py`) | Passed: 409 `STALE_BASIS`, old 12.99 and new 12.11 on the fuel line, nothing approved |
+| IT-07 | `test_it07_*` | Passed: refused without document; short-pay refused without acceptance; settled 27.72; reversal gives a −5.54 line in the next statement |
+| IT-08 | `test_it08_*` (`test_schema_worker.py`, 2 tests) | Passed |
+| IT-13 | `test_it13_*` | Passed with web modules blocked by an import hook (not a separate image) |
+| IT-16 | `test_it16_*` | Passed: concurrent approvals give one 200 and one 409 with current state; double-click replays |
+| IT-17 | `test_it17_single_migration_head` | Partly: single head only; two-branch CI and non-concurrent index check Not run |
+| IT-19 | `test_it19_*` (2 tests) | Passed: 409 `PAST_CONTEST_BY`, override stored, audited, counted |
+| IT-20 | `test_it20_*` | Passed: flag with 40.71 to 41.58, withdrawal note, metric 1, draft on the same value stale, withdrawal clears the flag and keeps the metric |
+| E2E-02 | `test_e2e02_api_level_*` | API-level form only: stale send blocked with amounts, sent claim flagged with note, re-approval unblocks. The browser test is Not run |
+
+Every other UT, IT and E2E ID stays `Not run`.
+
+**Blocked or not built in B1, and why.**
+
+| Task | Reason |
+|---|---|
+| T-2.2.3 sign-in, TOTP, invitations, sessions lifecycle; IT-02, IT-15, IT-22 | Not in B1 scope (foundation and core only). Tests seed sessions directly; no sign-in endpoint exists |
+| T-3.1.1, T-3.1.2 intake, T-3.2.1 extraction, UT-12 | Need the inbound email and extraction providers (sandbox accounts, no-training terms: T-1.1.4); only interfaces and fakes are allowed in B1 |
+| T-3.1.4 AP import, C-01 against AP payments, IT-21 | Not built; C-01 compares invoice history only |
+| T-5.1.2 templates and packets, UT-14 | Not built |
+| T-5.2.4, T-5.2.5, exports, deletion, operator grants | Not built |
+| Deployment, backups, restore (IT-12, IT-18 with Compose) | Out of B1 scope; Docker not available |
+| Any legal answer (F-017, broker periods) | Needs a lawyer; the calculator implements MH-09 as written |
+
+**Document changes made from implementation** (not re-reviewed):
+
+| File | Change | Reason |
+|---|---|---|
+| schema.md | `user_session.active_tenant_id`; `claim.basis_changed_after_send_at`; `fc_claim_next_job` noted on `job`; `check_result.check_code` sub-results and `arithmetic.basis`; `basis_snapshot` written at drafting too | RLS needs the tenant before the membership read; the wrong-basis metric must survive a withdrawal; the worker cannot read jobs before it knows the tenant; marking drafts needs their basis |
+| TRD.md 5.1 | Added POST `/invoices` (manual keying), POST `/claims/{id}/redraft`, GET `/reports/basis-metrics`, GET `/files/raw`; contest-by unknown treated as past it at approval | A stale draft had no path to re-approval; IT-19 and IT-20 metrics needed a reader; fail closed when no date exists |
+| PRD.md 8.1 | C-02 and C-04 report sub-results `C-02-BASE` and `C-04-SUPPORT` | One result per check and line could not hold both parts |
+| AGENTS.md, CLAUDE.md | State lines, utilities index, existing commands | Accuracy |
+
+**Found in the documents.** AGENTS.md section 9 names branches `T-x.y.z-short-name`; the build instruction named `feat/b1-foundation`, which was used. The schema's unique key on `invoice (tenant_id, carrier_account_id, invoice_number, revision_of)` does not stop a second original with the same number (nulls are distinct), which is what lets C-01 see a re-sent invoice; kept as written. The C-03 base when the expected linehaul is unavailable is not specified; B1 uses the billed net linehaul and labels it `base_source: billed_linehaul` in the arithmetic.

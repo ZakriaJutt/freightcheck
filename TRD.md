@@ -89,17 +89,21 @@ Base `/api/v1`, JSON, session cookie, `Idempotency-Key` required on every POST t
 | POST `/files`; GET `/files/{id}/url` | Upload; signed URL | Auditor+ |
 | GET `/intake`; POST `/intake/{id}/retry` | Intake list and retry | Auditor+ |
 | GET `/invoices`, `/invoices/{id}`; PATCH `/invoices/{id}/fields`; POST `/invoices/{id}/rerun` | Read, correct, re-run checks | Auditor+ |
+| POST `/invoices` | Manual keying form (the extraction fallback, 8.3); computes contest-by from receipt evidence; a forward's arrival time is accepted but never used. Added 2026-11-11 (B1) | Auditor+ |
 | GET, POST `/carriers`; PATCH `/carriers/{id}` | Carrier accounts and dispute window | Approver+ |
 | GET, POST `/rate-documents`; POST `/rate-documents/{id}/rules`; POST `/rate-documents/{id}/confirm`; POST `/rate-documents/{id}/revise` | Rate library. Confirmation is per document; revising a confirmed document creates the next revision | Enter: Auditor, Operator; confirm: Approver |
 | GET, POST `/fuel-index`; POST `/fuel-index/{id}/confirm` | Weekly index values; a correction is a new revision | Enter: Auditor+; confirm: Approver |
 | GET `/findings`; POST `/findings/{id}/decision` | Queue; confirm or dismiss | Auditor+ |
 | GET, POST `/claims`; GET `/claims/{id}` | Ledger; create draft | Auditor+ |
-| POST `/claims/{id}/approve` | Recompute, then freeze claimed amount; 409 `STALE_BASIS` or `PAST_CONTEST_BY` (the second accepts `override_reason`) | Approver |
+| POST `/claims/{id}/approve` | Recompute, then freeze claimed amount; 409 `STALE_BASIS` or `PAST_CONTEST_BY` (the second accepts `override_reason`; a non-broker invoice with no contest-by date is treated as past it) | Approver |
+| POST `/claims/{id}/redraft` | Re-run checks and rebuild an unsent claim's lines on the current basis; clears `stale_basis`; the claim must be approved again. Added 2026-11-11 (B1): without it a stale draft had no way forward | Auditor+ |
 | POST `/claims/{id}/sent` | Record send | Approver |
 | POST `/claims/{id}/events` | Acknowledgment, decision, withdrawal, rebill | Approver |
 | POST `/claims/{id}/settlements`; POST `/settlements/{id}/reverse` | Settlement with document | Approver |
 | GET, POST `/time-entries` | Time log | Auditor+ |
 | GET `/reports/nsv`; GET `/fee-statements` | Results | Viewer+ |
+| GET `/reports/basis-metrics` | Wrong-basis disputes sent and approvals by date override (IT-19, IT-20). Added 2026-11-11 (B1) | Viewer+ |
+| GET `/files/raw` | Signed, expiring file link built by `/files/{id}/url`; no session, signature only. Added 2026-11-11 (B1) | Public with signature |
 | POST `/imports/ap-payments` | CSV of paid freight bills and of carrier credits and refunds | Auditor+ |
 | GET `/reconciliation`; POST `/reconciliation/{ap_payment_id}` | Unmatched carrier credits; match to a claim or mark unrelated with a reason | Approver; read also by FreightCheck staff for gainshare tenants |
 | POST `/exports`; POST `/deletion-requests` | Export; delete | Owner |

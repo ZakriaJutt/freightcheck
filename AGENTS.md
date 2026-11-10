@@ -2,7 +2,7 @@
 
 Canonical instructions for any agent working in this repository. [CLAUDE.md](CLAUDE.md) adds product guidance and defers to this file.
 
-**State of the repository:** planning documents only. No application, script, migration or environment exists. Every command below is **proposed** until an implementation lands; do not report a proposed command as run.
+**State of the repository:** build milestone B1 on branch `feat/b1-foundation` (owner authorised implementation on 2026-11-11, before the Phase 0 gate; recorded in [verification-report-fixing.md](verification-report-fixing.md#9-build-milestone-b1-2026-11-11)). Present: the pure core engine, the B1 subset of the schema with forced row-level security, a minimal API for the core path, and a worker. Not present: sign-in (T-2.2.3), intake and extraction, any real provider, any UI. Commands marked **exists** in section 8 were run; all others stay **proposed**; do not report a proposed command as run.
 
 ## 1. Reading order
 
@@ -47,6 +47,25 @@ State a fact once, in its home, and cite it by ID elsewhere. Never restate a ris
 
 Before writing a helper, search `packages/core` and `packages/platform`. If it exists, use it; if it nearly fits, extend it there. Do not copy modules into the worker (R-03, R-06).
 
+Utilities index (B1):
+
+| Need | Use |
+|---|---|
+| Cents rounding, percent of cents, dollars to cents | `fc_core.money` (`round_half_up_cents`, `percent_of_cents`, `dollars_to_cents`) |
+| Governing document for an invoice | `fc_core.resolver.resolve`, `resolve_linehaul` |
+| Run checks, invoice roll-up, rule-parameter validation | `fc_core.checks.run_checks`, `roll_up`, `validate_rule_params` |
+| Contest-by date, days left, deadline sweep | `fc_core.deadline.compute_deadline`, `days_left`, `deadline_sweep` |
+| Claim status, approval guard, withdrawal note, fee lines, NSV | `fc_core.ledger.derive`, `evaluate_approval`, `withdrawal_note`, `fee_lines`, `net_settled_value` |
+| Settings | `fc_platform.settings.get_settings` (unknown or missing `FC_*` keys stop startup) |
+| Logging with correlation ID | `fc_platform.logging.configure_logging`, `log`, `correlation_id` |
+| Tenant context | `fc_platform.tenant.tenant_transaction`, `set_tenant` |
+| Storage key, signed URL, fake storage and scanner | `fc_platform.storage` |
+| Today's date in apps | `fc_platform.clock.today` (never in `fc_core`) |
+| Row by id under RLS, rows to core types | `fc_db.repo.get_row`, `load_invoice`, `load_context` |
+| Audit row, enqueue job, check run, recompute, mark dependent claims, claim state, fee statement | `fc_db.ops` |
+| Request transaction, roles, idempotency, error body | `fc_api.core` (`tenant_ctx`, `Ctx.require`, `idempotent`, `ApiError`) |
+| Worker loop | `fc_worker.main.process_one`, `run_until_idle` |
+
 ## 6. Tenant safety
 
 - Every query runs with the tenant context set; never bypass row-level security with the migration role.
@@ -63,7 +82,8 @@ Single linear head; expand then contract; concurrent index builds; resumable bac
 - A change to a check needs a unit test with worked arithmetic in the test name or docstring.
 - A change to permissions needs IT-01 or IT-02 extended.
 - A change to a screen needs the end-to-end test that covers its route.
-- Proposed commands: `make dev`, `make test`, `make check-boundaries`, `make migrate`. All proposed.
+- Commands. **Exists** (run in B1): `make venv`, `make env`, `make dev` (no Docker: migrates `freightcheck_dev`, seeds a synthetic tenant, starts the API on 8102 and the worker, waits for `/readyz`), `make migrate`, `make test-db` (drops and re-migrates `freightcheck_test`), `make test-unit`, `make test-int`, `make test`, `make lint`, `make typecheck`, `make check-boundaries`, `make check`. **Proposed**: `make db-repair`, `make backfill`, `make deploy`, `make restore`, `make fixtures`, and the Compose stack.
+- Integration tests and the app connect as the non-superuser role `freightcheck_app` (NOSUPERUSER NOBYPASSRLS); the owner role is used only for migrations and to seed or truncate test fixtures.
 
 ## 9. Git hygiene
 

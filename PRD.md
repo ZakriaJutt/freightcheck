@@ -94,9 +94,9 @@ Deterministic; each runs independently of the others (MH-04).
 | Code | Check | Needs |
 |---|---|---|
 | C-01 | Duplicate billing | Invoice history, AP payment import |
-| C-02 | Linehaul, discount and minimum charge against the governing rate. Where the contract is a discount off a base tariff the shipper does not hold `[S: SRC-11]`, the base rate is an exception (`BASE_TARIFF_UNAVAILABLE`) and only the discount percentage and minimum are checked against the gross charge printed on the invoice | Contract rate sheet, tariff or rate confirmation; base tariff rates where the contract refers to one |
+| C-02 | Linehaul, discount and minimum charge against the governing rate. Where the contract is a discount off a base tariff the shipper does not hold `[S: SRC-11]`, the base rate is an exception (`BASE_TARIFF_UNAVAILABLE`) and only the discount percentage and minimum are checked against the gross charge printed on the invoice. Reported as `C-02` (net linehaul) and, for the base-rate exception, `C-02-BASE` | Contract rate sheet, tariff or rate confirmation; base tariff rates where the contract refers to one |
 | C-03 | Fuel surcharge for the governing date | Fuel schedule, weekly index value |
-| C-04 | Accessorial amount against the schedule, and whether the service was requested or documented | Accessorial schedule, bill of lading, delivery receipt |
+| C-04 | Accessorial amount against the schedule, and whether the service was requested or documented. Reported per line as `C-04` (amount) and `C-04-SUPPORT` (support question; `DOCUMENT_MISSING` when no bill of lading is linked) | Accessorial schedule, bill of lading, delivery receipt |
 | C-05 | Reweigh: billed weight differs from the bill of lading | Bill of lading, carrier weight certificate |
 | C-06 | Reclass: billed class differs from the bill of lading | Bill of lading, carrier inspection certificate |
 | C-07 | Arithmetic: lines sum to the total | Invoice only |

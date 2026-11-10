@@ -65,7 +65,7 @@ Only fields beyond the conventions are listed. N = nullable.
 | | inbox_token | text | no | Unique, random; forms the forwarding address |
 | | deleted_at | timestamptz | yes | |
 | app_user | id, email (citext unique), password_hash, totp_secret_enc, totp_last_step (bigint, a step is accepted once), failed_count, locked_until | | | No `tenant_id`; global |
-| user_session | user_id, token_hash (unique), created_at, last_seen_at, expires_at, revoked_at | | | No `tenant_id`; server-side session |
+| user_session | user_id, active_tenant_id, token_hash (unique), created_at, last_seen_at, expires_at, revoked_at | | | No `tenant_id` and no RLS; server-side session. `active_tenant_id` (B1 addition, 2026-11-11) is the tenant chosen at sign-in; the API sets `app.tenant_id` from it and then reads the membership under RLS |
 | auth_token | user_id, purpose (`invite`, `reset`), token_hash (unique), expires_at, used_at, invited_tenant_id, invited_role | | | Single use; invitation 7 days, reset 30 minutes |
 | recovery_code | user_id, code_hash, used_at | | | Ten per user; unique (user_id, code_hash) |
 | idempotency_record | key, route, request_hash, response_status, response_body, expires_at | | | Unique (tenant_id, route, key); kept 24 hours |
@@ -132,7 +132,7 @@ Only fields beyond the conventions are listed. N = nullable.
 | extraction | source_file_id | uuid | no | |
 | | extractor_version | text | no | Unique (tenant_id, source_file_id, extractor_version) |
 | | fields | jsonb | no | Value, confidence, page, region per field |
-| job | kind, state | text | no | States `queued`, `running`, `done`, `failed`, `needs_manual` |
+| job | kind, state | text | no | States `queued`, `running`, `done`, `failed`, `needs_manual`. The worker claims the next job through the `SECURITY DEFINER` function `fc_claim_next_job(kinds)`, which returns only the job id and tenant id (B1 addition); all further work runs under that tenant's RLS context |
 | | idempotency_key | text | no | Unique (tenant_id, kind, idempotency_key) |
 | | attempt, run_after, correlation_id, payload, last_error | | | `payload` holds IDs only |
 
@@ -158,14 +158,14 @@ Only fields beyond the conventions are listed. N = nullable.
 | | amount_cents | bigint | no | |
 | invoice_document | invoice_id, source_file_id, doc_role | | no | Unique (invoice_id, source_file_id) |
 | field_revision | invoice_id, field, old_value, new_value, changed_by, reason | | | Append-only |
-| check_result | invoice_id, run_no, check_code | | no | Unique (invoice_id, run_no, check_code, line_no) |
+| check_result | invoice_id, run_no, check_code | | no | Unique (invoice_id, run_no, check_code, line_no), nulls not distinct. `check_code` is `C-01`...`C-08` or a sub-result `C-02-BASE` (base-rate exception) or `C-04-SUPPORT` (support question), per PRD 8.1 |
 | | line_no | int | yes | |
 | | status | text | no | `pass`, `variance`, `exception`, `not_applicable` |
 | | exception_code | text | yes | Required when `exception`: `GOVERNING_RATE_MISSING`, `GOVERNING_DATE_MISSING`, `BASE_TARIFF_UNAVAILABLE`, `FSC_BASIS_MISSING`, `INDEX_PRICE_MISSING`, `INDEX_PRICE_UNCONFIRMED`, `FIELD_UNCONFIRMED`, `DOCUMENT_MISSING`, `ENGINE_ERROR` |
 | | expected_cents, billed_cents, variance_cents | bigint | yes | |
 | | rate_rule_id, rate_document_revision, fuel_index_price_id | | yes | Basis |
 | | governing_date | date | yes | |
-| | arithmetic | jsonb | no | Inputs and steps |
+| | arithmetic | jsonb | no | Inputs and steps; `basis` lists every document id and revision and fuel index value id the result used (C-03 includes the linehaul document); `review_flags` for questions to a person |
 | | engine_version | text | no | |
 | finding | invoice_id, check_code, line_no | | | Unique; survives re-runs |
 | | current_result_id | uuid | no | |
@@ -183,10 +183,11 @@ Only fields beyond the conventions are listed. N = nullable.
 | | claimed_cents | bigint | yes | Null while draft; frozen at approval |
 | | accepted_cents | bigint | yes | Null until a decision event |
 | | settled_cents | bigint | no | 0; equals the sum of unreversed settlements, maintained in the same transaction |
-| | basis_snapshot | jsonb | yes | Rule IDs and document versions at approval |
+| | basis_snapshot | jsonb | yes | Written at drafting and refreshed at approval: claim lines (finding, claimed cents, basis) plus `document_ids` and `fuel_index_price_ids` arrays, which the marking of dependent claims queries |
 | | origin | text | no | `lookback`, `pilot`, `recurring`; set from the invoice's intake batch |
 | | stale_basis | boolean | no | false; set when a basis changes before sending; blocks approve and mark-sent |
 | | basis_changed_after_send | boolean | no | false; set when a basis changes after sending; cleared only by a withdrawal or an Approver's recorded review |
+| | basis_changed_after_send_at | timestamptz | yes | B1 addition: first time the flag was set; never cleared; counts the claim in the wrong-basis metric |
 | | late_override_reason | text | yes | Set when approved after `contest_by` |
 | | approved_by, approved_at, sent_at, sent_to | | yes | |
 | claim_line | claim_id, finding_id, claimed_cents | | no | Unique (claim_id, finding_id) |
@@ -255,7 +256,7 @@ Tenant boundary: RLS policy `tenant_id = current_setting('app.tenant_id')::uuid`
 ## 6. Provenance, versions and timestamps
 
 - Every invoice field traces to `extraction.fields` (extractor version, page, region) or a `field_revision` (user, time, reason).
-- Every check result stores engine version, rule ID, document version, governing date and arithmetic. A claim stores a `basis_snapshot` at approval.
+- Every check result stores engine version, rule ID, document version, governing date and arithmetic. A claim stores a `basis_snapshot` at drafting and again at approval.
 - Event dates (`occurred_on`, `settled_on`) are the dates on documents; `created_at` is when FreightCheck learned of them. Reports use document dates and show both when they differ by more than 7 days.
 
 ## 7. Transactions and duplicates
