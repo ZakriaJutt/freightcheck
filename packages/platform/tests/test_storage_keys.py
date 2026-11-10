@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 
 import pytest
+
 from fc_platform.storage import SIGNED_URL_SECONDS, signed_url, storage_key, verify
 
 TENANT = uuid.UUID("00000000-0000-4000-8000-000000000001")
