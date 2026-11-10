@@ -185,12 +185,12 @@ Items documents cannot close.
 | T-4.1.3 | Governing-rate resolver |
 | T-4.2.1 to T-4.2.5 | Check registry and runner, exception codes, invoice roll-up; C-02 with base-tariff case; C-07; C-03; C-04 amount and support question; C-01 against invoice history |
 | T-4.2.6 (part) | C-08 late-rebill question only; C-05 and C-06 not built |
-| T-4.2.7 (core) | Contest-by calculator with receipt evidence order, proxy, contract term, broker case; sweep logic (UT-15). The daily sweep job and reminder sending are not built |
+| T-4.2.7 (core) | Contest-by calculator with receipt evidence order, proxy, contract term, broker case; sweep logic (UT-15). Round 1 added the daily sweep job (expiry and reminder records); reminder email sending stays behind a provider not built in B1 |
 | T-5.1.3 | Approve with recompute, stale-basis and contest-by guards with override; send record; basis-changed-after-send flag, banner and withdrawal note; redraft. BCC capture not built |
 | T-5.1.4 (API subset) | Events with reason codes, settlements with required document, reversal, derived status, claim origin |
 | T-5.2.2, T-5.2.3 (core and job only) | NSV and gainshare arithmetic; fee statement job with reversal lines. Report screen, AP-credit reconciliation (IT-21) not built |
 
-**Test results.** All run on 2026-11-11 from a clean test database.
+**Test results (initial B1 run, before review round 1).** All run on 2026-11-11 from a clean test database. Current counts are in 9.1.
 
 | Command | Result |
 |---|---|
@@ -216,7 +216,7 @@ Items documents cannot close.
 | UT-10 | `test_ut10_*` | Passed: time 393.33, NSV 1,557.67, fees 30.35, reversal −6.35 |
 | UT-11 | `test_ut11_*` | Passed: 226 days; arithmetic 1.00 shown as pass |
 | UT-13 | `packages/platform/tests/test_storage_keys.py` | Passed |
-| UT-15 | `TestUT15Sweep` | Passed (sweep logic; the job is not built) |
+| UT-15 | `TestUT15Sweep` | Passed (sweep logic). Since round 1 the `deadline_sweep` job exists; see 9.1 |
 | IT-01 | `apps/api/tests/test_isolation.py` (5 tests) | Passed |
 | IT-06 | `test_it06_*` (`test_core_path.py`) | Passed: 409 `STALE_BASIS`, old 12.99 and new 12.11 on the fuel line, nothing approved |
 | IT-07 | `test_it07_*` | Passed: refused without document; short-pay refused without acceptance; settled 27.72; reversal gives a −5.54 line in the next statement |
@@ -252,3 +252,43 @@ Every other UT, IT and E2E ID stays `Not run`.
 | AGENTS.md, CLAUDE.md | State lines, utilities index, existing commands | Accuracy |
 
 **Found in the documents.** AGENTS.md section 9 names branches `T-x.y.z-short-name`; the build instruction named `feat/b1-foundation`, which was used. The schema's unique key on `invoice (tenant_id, carrier_account_id, invoice_number, revision_of)` does not stop a second original with the same number (nulls are distinct), which is what lets C-01 see a re-sent invoice; kept as written. The C-03 base when the expected linehaul is unavailable is not specified; B1 uses the billed net linehaul and labels it `base_source: billed_linehaul` in the arithmetic.
+
+### 9.1 Review round 1 fixes (2026-11-11)
+
+Review `_coordination/review/freightcheck-b1-round1.md` (1 blocker, 7 major, 4 minor). The reviewer's scripts were run before and after the fixes.
+
+| Script | Before | After |
+|---|---|---|
+| `freightcheck-b1-core_adversarial.py` (15 cases) | 9 FAIL, 6 ok | 15 ok |
+| `freightcheck-b1-api_adversarial.py` (10 tests) | 9 failed, 1 passed | 9 passed, 1 failed: B5 stops at `StopIteration` because a corrected invoice now raises no C-01 finding at all (ruling: supersede, not duplicate); the defect it probed (a duplicate claimable for the whole total) is covered by `test_b5_*` in the repo |
+
+| Finding | Status | Fix | Regression tests |
+|---|---|---|---|
+| B1-001 blocker | Fixed, not re-reviewed | Every confirmation (new document, revision, index value or correction) re-evaluates the carrier's open claims (all carriers for a tenant-wide value): unsent → `stale_basis`, sent → `basis_changed_after_send`; `sent` recomputes and refuses `STALE_BASIS` | `test_b3_*`, `test_b4_*`, `test_send_refused_when_basis_changed_*` |
+| B1-002 major | Fixed, not re-reviewed | `sent` after contest-by needs `override_reason` (stored with the Approver in `late_send_reason`, `late_send_by`) unless the approval carried one; `deadline_sweep` job per tenant (`fc_enqueue_deadline_sweeps`) expires unsent claims past contest-by (not those approved with an override) and records reminders once in `notification` | `test_b2_*`, `test_sweep_*` (API and core) |
+| B1-003 major | Fixed, not re-reviewed | No billed-linehaul fallback: no expected linehaul → C-03 `FSC_BASIS_MISSING` | `test_a1_*`, `test_a2_*`, `test_fuel_base_with_base_tariff_unavailable_*`, `test_unconfirmed_rate_confirmation_blocks_*` |
+| B1-004 major | Fixed, not re-reviewed | Resolver fails closed: an entered document that may govern blocks (an entered revision of a confirmed one does not); a specific scope with a missing basis date never falls through; lane-scoped documents implemented via `invoice.lane_key`, and block while the lane is unknown; an unusable rate confirmation for the PRO is final | `test_a4_*`, `test_a5_*`, `test_a5b_*`, `test_new_unconfirmed_contract_sheet_*`, `test_lane_key_*` |
+| B1-005 major | Fixed, not re-reviewed | Stated precedence in `select_fuel_value`: confirmed only; one publication; one confirmed value per level (unique index); carrier-specific preferred when equal to the tenant-wide value, exception when they differ or when an unconfirmed value at the other level may govern; loader ordered | `test_a6_*`, `test_carrier_and_tenant_values_*`, `test_unconfirmed_carrier_value_*`, `test_b1_*` |
+| B1-006 major | Fixed, not re-reviewed | C-01 is review-only (no claimable amount; `possible_duplicate` flag); the revision chain is excluded from duplicate candidates | `test_duplicate_is_review_only_*`, `test_b5_*` |
+| B1-007 major | Fixed, not re-reviewed | Accepted capped at claimed (API 422 `ABOVE_CLAIMED`, core backstop); settlements above accepted (or claimed) need `excess_reason`; `settled` only after a decision accepting money with settlements covering it | `test_a11_*`, `test_a12_*`, `test_b6_b7_*` |
+| B1-008 major | Fixed, not re-reviewed | Receipt evidence after today or after the forward's arrival is dropped in the core and refused by the API (422 `RECEIPT_DATE_IMPOSSIBLE`). A receipt before the invoice date is not checked (left configurable, not built) | `test_a8_*`, `test_b8_*` |
+| B1-009 minor | Fixed, not re-reviewed | `sent_on` between the approval date (approval event) and today | `test_b9_*` |
+| B1-010 minor | Fixed, not re-reviewed | Unexpected errors return JSON 500 `INTERNAL_ERROR` with the correlation ID; fuel confirm re-checks the prior value and maps the unique-index race to 409 | `test_unexpected_error_*` |
+| B1-011 minor | Fixed, not re-reviewed | Decision and settlement evidence must be `carrier_response` or `settlement_evidence` | `test_b6_b7_*` |
+| B1-012 minor | Fixed, not re-reviewed | `seed_dev` writes the session to git-ignored `.local/dev-session.txt` (0600); prints only with `--print-session` | Manual: `DEV_SMOKE=1 tools/dev.sh` output checked |
+
+Other changes: migration `0002` (expand only: `invoice.lane_key`, `claim.late_send_reason`, `claim.late_send_by`, `settlement.excess_reason`, table `notification` with forced RLS, function `fc_enqueue_deadline_sweeps`); UT-02 fixture marks v4 as an entered revision of v3 (the catalogue's "unconfirmed v4"); E2E-02 API test now sends on 1 Apr (a 2 Apr send was in the future and is now refused).
+
+**Current results** (2026-11-11, clean test database):
+
+| Command | Result |
+|---|---|
+| `make test-db` (to `0002`) | OK |
+| `make test-unit` | 63 passed, 0 failed |
+| `make test-int` | 39 passed, 0 failed |
+| `make lint` | Passed, 43 files |
+| `make typecheck` | Passed, 30 source files |
+| `make check-boundaries` | 0 violations |
+| `DEV_SMOKE=1 tools/dev.sh` | API ready on 8102, worker started, session written to `.local/dev-session.txt` |
+
+Documents changed in round 1: PRD.md (MH-08, MH-09, MH-10, C-01, C-03), schema.md (`scope_key`, fuel value precedence, `lane_key`, `late_send_*`, `excess_reason`, `notification`), TRD.md 5.1 and 6.2 (send guards, settlements, invoices, 500 contract, re-evaluation on any confirmation), AGENTS.md utilities index. Decision.md section 4 is not changed: the receipt bound is input validation, not a new deadline rule.

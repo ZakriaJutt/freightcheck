@@ -52,19 +52,19 @@ Utilities index (B1):
 | Need | Use |
 |---|---|
 | Cents rounding, percent of cents, dollars to cents | `fc_core.money` (`round_half_up_cents`, `percent_of_cents`, `dollars_to_cents`) |
-| Governing document for an invoice | `fc_core.resolver.resolve`, `resolve_linehaul` |
-| Run checks, invoice roll-up, rule-parameter validation | `fc_core.checks.run_checks`, `roll_up`, `validate_rule_params` |
+| Governing document for an invoice (fails closed on unconfirmed, lane-unknown or ambiguous documents) | `fc_core.resolver.resolve`, `resolve_linehaul`, `scope_for` |
+| Run checks, invoice roll-up, rule-parameter validation, fuel value precedence | `fc_core.checks.run_checks`, `roll_up`, `validate_rule_params`, `select_fuel_value` |
 | Contest-by date, days left, deadline sweep | `fc_core.deadline.compute_deadline`, `days_left`, `deadline_sweep` |
-| Claim status, approval guard, withdrawal note, fee lines, NSV | `fc_core.ledger.derive`, `evaluate_approval`, `withdrawal_note`, `fee_lines`, `net_settled_value` |
+| Claim status, approval guard, settlement cap, withdrawal note, fee lines, NSV | `fc_core.ledger.derive`, `evaluate_approval`, `settlement_cap`, `withdrawal_note`, `fee_lines`, `net_settled_value` |
 | Settings | `fc_platform.settings.get_settings` (unknown or missing `FC_*` keys stop startup) |
 | Logging with correlation ID | `fc_platform.logging.configure_logging`, `log`, `correlation_id` |
 | Tenant context | `fc_platform.tenant.tenant_transaction`, `set_tenant` |
 | Storage key, signed URL, fake storage and scanner | `fc_platform.storage` |
 | Today's date in apps | `fc_platform.clock.today` (never in `fc_core`) |
 | Row by id under RLS, rows to core types | `fc_db.repo.get_row`, `load_invoice`, `load_context` |
-| Audit row, enqueue job, check run, recompute, mark dependent claims, claim state, fee statement | `fc_db.ops` |
+| Audit row, enqueue job, check run, recompute, basis check, re-evaluate claims after a confirmation, mark dependent claims, claim state, fee statement, deadline sweep | `fc_db.ops` (`reevaluate_claims`, `basis_changed`, `run_deadline_sweep`, ...) |
 | Request transaction, roles, idempotency, error body | `fc_api.core` (`tenant_ctx`, `Ctx.require`, `idempotent`, `ApiError`) |
-| Worker loop | `fc_worker.main.process_one`, `run_until_idle` |
+| Worker loop, daily sweep enqueue | `fc_worker.main.process_one`, `run_until_idle`, `enqueue_daily_sweeps` (`python -m fc_worker --sweep`) |
 
 ## 6. Tenant safety
 

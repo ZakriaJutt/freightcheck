@@ -69,7 +69,7 @@ Only fields beyond the conventions are listed. N = nullable.
 | auth_token | user_id, purpose (`invite`, `reset`), token_hash (unique), expires_at, used_at, invited_tenant_id, invited_role | | | Single use; invitation 7 days, reset 30 minutes |
 | recovery_code | user_id, code_hash, used_at | | | Ten per user; unique (user_id, code_hash) |
 | idempotency_record | key, route, request_hash, response_status, response_body, expires_at | | | Unique (tenant_id, route, key); kept 24 hours |
-| notification | kind (`deadline_30`, `deadline_14`, `deadline_3`, `carrier_overdue`), entity_id, sent_at | | | Unique (tenant_id, kind, entity_id) so a reminder is sent once |
+| notification | kind (`deadline_30`, `deadline_14`, `deadline_3`, `carrier_overdue`), entity_id, sent_at | | | Unique (tenant_id, kind, entity_id) so a reminder is sent once. Built in migration 0002 with forced RLS; the daily sweep job is enqueued per tenant by the `SECURITY DEFINER` function `fc_enqueue_deadline_sweeps(date)` (review round 1, 2026-11-11) |
 | membership | user_id | uuid | no | FK `app_user` |
 | | role | text | no | `owner`, `approver`, `auditor`, `viewer`; unique (tenant_id, user_id) |
 | operator_grant | operator_user_id, granted_by | uuid | no | |
@@ -89,7 +89,7 @@ Only fields beyond the conventions are listed. N = nullable.
 | | doc_type | text | no | `contract_rate_sheet`, `tariff`, `accessorial_schedule`, `fuel_schedule`, `rate_confirmation` |
 | | effective_from | date | no | |
 | | effective_to | date | yes | Check: null or after `effective_from` |
-| | scope_key | text | no | `'*'`; lane group or, for a rate confirmation, the PRO |
+| | scope_key | text | no | `'*'`; lane group or, for a rate confirmation, the PRO. A lane-scoped document applies to invoices with that `lane_key`; while an invoice's lane is unknown, a lane-scoped document that may govern blocks the check (review round 1, 2026-11-11) |
 | | date_basis | text | no | `pickup_date`, `tender_date`, `delivery_date`, `invoice_date`; selects the governing date for every rule in the document |
 | | date_basis_source_page | int | yes | Null means the document is silent and the Approver chose; shown as a flag |
 | | revision | int | no | 1; a change to a confirmed document inserts a new row with revision + 1 and `revises_id`; not the optimistic-lock `version` |
@@ -109,7 +109,7 @@ Only fields beyond the conventions are listed. N = nullable.
 | | price | numeric(7,4) | no | |
 | | published_on | date | no | |
 | | source_note | text | no | Where the user read it |
-| | status, confirmed_by, confirmed_at | | | `entered`, `confirmed`, `superseded`; only `confirmed` values are used |
+| | status, confirmed_by, confirmed_at | | | `entered`, `confirmed`, `superseded`; only `confirmed` values are used. At most one confirmed value per (tenant, carrier or tenant-wide, index, week) (`uq_fuel_index_price_one_confirmed`); a carrier-specific and a tenant-wide value for the same week are used only when equal (review round 1, 2026-11-11) |
 | | revision, revises_id | | | A correction is a new row; unique key above includes `revision` |
 
 ### Intake
@@ -149,6 +149,7 @@ Only fields beyond the conventions are listed. N = nullable.
 | | contest_by | date | yes | Written only by the deadline calculator |
 | | deadline_basis | text | no | `receipt_plus_180`, `invoice_date_proxy_plus_180`, `contract_term`, `none_broker` |
 | | total_cents, billed_weight_lb, billed_class | | | |
+| | lane_key | text | yes | Lane group that selects lane-scoped documents; null = unknown (migration 0002 (review round 1, 2026-11-11)) |
 | | fields_confirmed | boolean | no | false |
 | | status | text | no | `needs_review`, `needs_input`, `variance`, `clean`; set by the engine; check: `clean` only when no exception exists (enforced in code, tested by UT-06) |
 | | field_revision, ruleset_revision | int | no | Inputs to the checks idempotency key |
@@ -189,6 +190,7 @@ Only fields beyond the conventions are listed. N = nullable.
 | | basis_changed_after_send | boolean | no | false; set when a basis changes after sending; cleared only by a withdrawal or an Approver's recorded review |
 | | basis_changed_after_send_at | timestamptz | yes | B1 addition: first time the flag was set; never cleared; counts the claim in the wrong-basis metric |
 | | late_override_reason | text | yes | Set when approved after `contest_by` |
+| | late_send_reason, late_send_by | text, uuid | yes | Set together when the send is recorded after `contest_by` (migration 0002 (review round 1, 2026-11-11)) |
 | | approved_by, approved_at, sent_at, sent_to | | yes | |
 | claim_line | claim_id, finding_id, claimed_cents | | no | Unique (claim_id, finding_id) |
 | claim_event | claim_id | uuid | no | Append-only |
@@ -207,6 +209,7 @@ Only fields beyond the conventions are listed. N = nullable.
 | | carrier_reference | text | yes | Unique (tenant_id, claim_id, method, carrier_reference) |
 | | ap_payment_id | uuid | yes | The imported credit or refund this settlement was reconciled to |
 | | reversed_at, reversed_by, reverse_reason | | yes | |
+| | excess_reason | text | yes | Required when settlements would exceed accepted (or claimed before a decision) (migration 0002 (review round 1, 2026-11-11)) |
 | time_entry | user_id, activity, minutes, work_date | | no | `activity` in `setup`, `review`, `dispute`; check minutes between 1 and 720 |
 | | supersedes_id | uuid | yes | Edits create a new row |
 | fee_statement | period_start, period_end, plan, total_cents, issued_at | | | Unique (tenant_id, period_start, plan) |

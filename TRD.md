@@ -76,7 +76,7 @@ Rules: `apps/*` import only from `packages/*`; `packages/core` imports nothing f
 
 ### 5.1 API contracts
 
-Base `/api/v1`, JSON, session cookie, `Idempotency-Key` required on every POST that creates or sends. Errors: `{code, message, field?, correlation_id}`. Cross-tenant or unknown IDs return 404.
+Base `/api/v1`, JSON, session cookie, `Idempotency-Key` required on every POST that creates or sends. Errors: `{code, message, field?, correlation_id}`. Cross-tenant or unknown IDs return 404. An unexpected error returns 500 with the same body and code `INTERNAL_ERROR` (review round 1, 2026-11-11).
 
 | Method and path | Purpose | Roles |
 |---|---|---|
@@ -89,7 +89,7 @@ Base `/api/v1`, JSON, session cookie, `Idempotency-Key` required on every POST t
 | POST `/files`; GET `/files/{id}/url` | Upload; signed URL | Auditor+ |
 | GET `/intake`; POST `/intake/{id}/retry` | Intake list and retry | Auditor+ |
 | GET `/invoices`, `/invoices/{id}`; PATCH `/invoices/{id}/fields`; POST `/invoices/{id}/rerun` | Read, correct, re-run checks | Auditor+ |
-| POST `/invoices` | Manual keying form (the extraction fallback, 8.3); computes contest-by from receipt evidence; a forward's arrival time is accepted but never used. Added 2026-11-11 (B1) | Auditor+ |
+| POST `/invoices` | Manual keying form (the extraction fallback, 8.3); computes contest-by from receipt evidence; a forward's arrival time is never used as receipt but bounds it: evidence after it or after today is refused 422 `RECEIPT_DATE_IMPOSSIBLE` (review round 1, 2026-11-11); optional `lane_key`. Added 2026-11-11 (B1) | Auditor+ |
 | GET, POST `/carriers`; PATCH `/carriers/{id}` | Carrier accounts and dispute window | Approver+ |
 | GET, POST `/rate-documents`; POST `/rate-documents/{id}/rules`; POST `/rate-documents/{id}/confirm`; POST `/rate-documents/{id}/revise` | Rate library. Confirmation is per document; revising a confirmed document creates the next revision | Enter: Auditor, Operator; confirm: Approver |
 | GET, POST `/fuel-index`; POST `/fuel-index/{id}/confirm` | Weekly index values; a correction is a new revision | Enter: Auditor+; confirm: Approver |
@@ -97,9 +97,9 @@ Base `/api/v1`, JSON, session cookie, `Idempotency-Key` required on every POST t
 | GET, POST `/claims`; GET `/claims/{id}` | Ledger; create draft | Auditor+ |
 | POST `/claims/{id}/approve` | Recompute, then freeze claimed amount; 409 `STALE_BASIS` or `PAST_CONTEST_BY` (the second accepts `override_reason`; a non-broker invoice with no contest-by date is treated as past it) | Approver |
 | POST `/claims/{id}/redraft` | Re-run checks and rebuild an unsent claim's lines on the current basis; clears `stale_basis`; the claim must be approved again. Added 2026-11-11 (B1): without it a stale draft had no way forward | Auditor+ |
-| POST `/claims/{id}/sent` | Record send | Approver |
+| POST `/claims/{id}/sent` | Record send. Recomputes the basis (409 `STALE_BASIS`); after contest-by needs `override_reason` unless the approval had one (409 `PAST_CONTEST_BY`); `sent_on` between the approval date and today (review round 1, 2026-11-11) | Approver |
 | POST `/claims/{id}/events` | Acknowledgment, decision, withdrawal, rebill | Approver |
-| POST `/claims/{id}/settlements`; POST `/settlements/{id}/reverse` | Settlement with document | Approver |
+| POST `/claims/{id}/settlements`; POST `/settlements/{id}/reverse` | Settlement with a carrier-response or settlement-evidence document; above accepted (or claimed) needs `excess_reason` (review round 1, 2026-11-11) | Approver |
 | GET, POST `/time-entries` | Time log | Auditor+ |
 | GET `/reports/nsv`; GET `/fee-statements` | Results | Viewer+ |
 | GET `/reports/basis-metrics` | Wrong-basis disputes sent and approvals by date override (IT-19, IT-20). Added 2026-11-11 (B1) | Viewer+ |
@@ -165,7 +165,7 @@ sequenceDiagram
   A->>D: append event, audit event
 ```
 
-Approval recomputes inside one transaction and fails closed if any line's document revision or fuel index value is unconfirmed, superseded or outside its effective dates, or if the invoice lacks the date the document's basis needs. The same marking runs when a confirmed fuel index value is corrected. A claim already sent cannot be recalled; the product flags it, counts it in the wrong-basis metric and generates a withdrawal note for the user to send (IT-06, IT-20, E2E-02).
+Any confirmation (a new document, a revision, an index value or its correction) re-evaluates every open claim of the carrier (all carriers for a tenant-wide index value): a changed unsent claim becomes stale, a changed sent claim is flagged; recording a send recomputes once more (review round 1, 2026-11-11). Approval recomputes inside one transaction and fails closed if any line's document revision or fuel index value is unconfirmed, superseded or outside its effective dates, or if the invoice lacks the date the document's basis needs. The same marking runs when a confirmed fuel index value is corrected. A claim already sent cannot be recalled; the product flags it, counts it in the wrong-basis metric and generates a withdrawal note for the user to send (IT-06, IT-20, E2E-02).
 
 ### 6.3 Jobs, retries, timeouts, idempotency
 
