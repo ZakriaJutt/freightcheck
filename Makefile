@@ -22,7 +22,7 @@ test-db:
 	tools/reset_db.sh freightcheck_test
 
 test-unit:
-	$(PY) -m pytest -c tools/pytest.ini --rootdir . packages/core/tests tools
+	$(PY) -m pytest -c tools/pytest.ini --rootdir . packages/core/tests packages/platform/tests tools
 
 test-int:
 	$(PY) -m pytest -c tools/pytest.ini --rootdir . apps/api/tests
