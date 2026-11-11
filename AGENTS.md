@@ -62,7 +62,7 @@ Utilities index (B1):
 | Storage key, signed URL, fake storage and scanner | `fc_platform.storage` |
 | Today's date in apps | `fc_platform.clock.today` (never in `fc_core`) |
 | Row by id under RLS, rows to core types | `fc_db.repo.get_row`, `load_invoice`, `load_context` |
-| Audit row, enqueue job, check run, recompute, basis check, re-evaluate claims after a confirmation, mark dependent claims, claim state, fee statement, deadline sweep | `fc_db.ops` (`reevaluate_claims`, `basis_changed`, `run_deadline_sweep`, ...) |
+| Audit row, enqueue job, check run, recompute, basis check, re-evaluate claims after a confirmation (per-line before and after), claim state, fee statement, deadline sweep | `fc_db.ops` (`states_before`, `reevaluate_claims`, `line_changed`, `basis_changed`, `unresolved_lines`, `run_deadline_sweep`, ...) |
 | Request transaction, roles, idempotency, error body | `fc_api.core` (`tenant_ctx`, `Ctx.require`, `idempotent`, `ApiError`) |
 | Worker loop, daily sweep enqueue | `fc_worker.main.process_one`, `run_until_idle`, `enqueue_daily_sweeps` (`python -m fc_worker --sweep`) |
 

@@ -331,3 +331,44 @@ Reviewer's R6 note (a `lane_key` that matches no lane document uses the wildcard
 Current results (clean test database, head `0003`): `make test-unit` 64 passed, 0 failed; `make test-int` 41 passed, 0 failed. `make lint` passed (43 files). `make typecheck` passed (31 files). `make check-boundaries` found 0 violations.
 
 Documents changed this round: PRD.md (MH-09), App-flow.md (past contest-by state), TRD.md (5.1 send `BASIS_UNRESOLVED`, 6.2 re-evaluation scope, 6.3 `deadline_sweep`), schema.md (`past_contest_by`, lane re-evaluation, pending revision), execution-plan.md (UT-15, T-4.2.7). MH-08 text was already consistent with the ruling and is unchanged.
+
+### 9.3 Review round 3 (retest, 2026-11-11)
+
+Reviewer verdicts, transcribed unchanged from `_coordination/review/freightcheck-b1-verdicts.json` (round 3, commit `a06427e`):
+
+| Finding | Reviewer verdict |
+|---|---|
+| B1-001 | Closed |
+| B1-002 | Closed |
+| B1-003 | Closed |
+| B1-004 | Closed |
+| B1-005 | Closed |
+| B1-006 | Closed |
+| B1-007 | Closed |
+| B1-008 | Closed |
+| B1-009 | Closed |
+| B1-010 | Closed |
+| B1-011 | Closed |
+| B1-012 | Closed |
+| B1-013 | Closed, part open: after an unrelated lane document exists, the next lane-less confirmation (e.g. a routine tenant-wide fuel value for another week) still flags lane-less sent claims basis_changed_after_send with a withdrawal note and counts them in wrong_basis_sent (case S1) |
+| B1-014 | Closed |
+| B1-015 | Closed |
+
+This round's edit, **fixed after round-3 retest, awaiting recheck** (not reviewed again):
+
+| Finding | Fix | Regression tests |
+|---|---|---|
+| B1-013 part (major) | Every rate-document and fuel-value confirmation takes the state of each claimed line of the open claims before it changes anything (`fc_db.ops.states_before`) and compares it per line afterwards (`line_changed`): status, exception code, expected and variance cents, governing document ids with revisions, and the fuel index price used (by price, so a correction to the same price changes nothing). A claim is marked stale or `basis_changed_after_send` only if a line differs, the line no longer matches its drafted basis, and the difference is not merely a new exception while the documents it was computed from stay confirmed. `document_governs`, `mark_dependent_claims` and `merge_marked` are removed; a revision still marks claims whose lines it governs because the governing revision changes | `test_b1_013_s1_fuel_value_for_another_week_*` (reviewer case S1), `test_b1_013_same_week_fuel_correction_to_the_identical_value_*`, `test_b1_013_same_week_fuel_correction_to_a_different_value_*` |
+
+| Script | Before this edit | After |
+|---|---|---|
+| `freightcheck-b1-round3_adversarial.py` (8) | 7 passed, 1 failed (S1) | 8 passed |
+| `freightcheck-b1-round2_adversarial.py` (9) | 9 passed | 9 passed |
+| `freightcheck-b1-api_adversarial.py` (10) | 10 passed | 10 passed |
+| `freightcheck-b1-core_adversarial.py` (15) | 15 ok | 15 ok |
+
+Current results (`make test-db`, clean test database, head `0003`): `make test-unit` 64 passed, 0 failed; `make test-int` 44 passed, 0 failed. `make lint` passed (43 files). `make typecheck` passed (31 files). `make check-boundaries` found 0 violations.
+
+Documents changed: TRD.md 6.2 (per-line before-and-after re-evaluation), schema.md (`scope_key` note), AGENTS.md (utilities index).
+
+Known limit, not changed: an approved, unsent claim whose fuel value is corrected to the same price is not marked stale, but send still compares the stored basis by value id and refuses with `STALE_BASIS`; redraft resolves it (fails closed). From code reading; not tested.

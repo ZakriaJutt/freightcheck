@@ -6,10 +6,11 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
-from sqlalchemy import Connection, Row, func, select, text
+from sqlalchemy import Connection, Row, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from fc_core.checks import ENGINE_VERSION, roll_up, run_checks
@@ -24,9 +25,11 @@ from fc_db.tables import (
     fee_statement,
     fee_statement_line,
     finding,
+    fuel_index_price,
     invoice,
     job,
     notification,
+    rate_document,
     settlement,
     tenant,
 )
@@ -215,44 +218,6 @@ def refresh_claim_state(conn: Connection, claim_id: uuid.UUID) -> Row[Any]:
     return get_row(conn, claim, claim_id)
 
 
-def mark_dependent_claims(
-    conn: Connection, *, prior_document_id: uuid.UUID | None = None, prior_fuel_index_price_id: uuid.UUID | None = None
-) -> dict[str, list[uuid.UUID]]:
-    """A basis was superseded: unsent claims become stale, sent ones are flagged (TRD 6.2)."""
-    if prior_document_id is not None:
-        cond = text("basis_snapshot->'document_ids' ? :ref").bindparams(ref=str(prior_document_id))
-    elif prior_fuel_index_price_id is not None:
-        cond = text("basis_snapshot->'fuel_index_price_ids' ? :ref").bindparams(ref=str(prior_fuel_index_price_id))
-    else:
-        raise ValueError("a prior basis is required")
-    stale = (
-        conn.execute(
-            claim.update()
-            .where(cond, claim.c.status.in_(("draft", "approved")))
-            .values(stale_basis=True, version=claim.c.version + 1, updated_at=func.now())
-            .returning(claim.c.id)
-        )
-        .scalars()
-        .all()
-    )
-    flagged = (
-        conn.execute(
-            claim.update()
-            .where(cond, claim.c.status.notin_(("draft", "approved", "withdrawn", "expired")))
-            .values(
-                basis_changed_after_send=True,
-                basis_changed_after_send_at=func.coalesce(claim.c.basis_changed_after_send_at, func.now()),
-                version=claim.c.version + 1,
-                updated_at=func.now(),
-            )
-            .returning(claim.c.id)
-        )
-        .scalars()
-        .all()
-    )
-    return {"stale": list(stale), "changed_after_send": list(flagged)}
-
-
 # ------------------------------------------------------------------ fees
 
 GAINSHARE_PLANS = ("pilot_gainshare", "gainshare")
@@ -325,34 +290,119 @@ def unresolved_lines(conn: Connection, c: Row[Any]) -> list[str]:
     return [k for k in compare_basis(lines, rc) if k in rc and rc[k].status == "exception"]
 
 
-def document_governs(doc: Row[Any] | None, inv: Row[Any]) -> bool:
-    """B1-013: can this document govern a line of this invoice? A tenant-wide or carrier fuel value
-    (doc None) and a lane-less document can; a lane document only for that lane; a rate
-    confirmation only for its PRO."""
-    if doc is None or doc.scope_key == "*":
-        return True
-    if doc.doc_type == "rate_confirmation":
-        return bool(inv.pro_number) and inv.pro_number == doc.scope_key
-    return bool(inv.lane_key == doc.scope_key)
+@dataclass(frozen=True)
+class LineState:
+    """What governs one check line at a moment: `signature` is compared before and after a
+    confirmation (status, exception code, expected and variance cents, governing document ids with
+    revisions, fuel index price used); `recomputed` is the same run in the form `compare_basis`
+    takes; the ids are those the line was computed from."""
+
+    signature: tuple[Any, ...]
+    recomputed: Recomputed
+    document_ids: tuple[str, ...]
+    fuel_index_price_ids: tuple[str, ...]
 
 
-def reevaluate_claims(
-    conn: Connection, carrier_account_id: uuid.UUID | None, document: Row[Any] | None = None
-) -> dict[str, list[uuid.UUID]]:
-    """After any confirmation (new document, revision, index value or its correction), recompute
-    the open claims that document can govern (B1-013: same carrier and matching lane or PRO scope;
-    all carriers for a tenant-wide index value). A changed unsent claim becomes stale; a changed
-    sent claim is flagged basis_changed_after_send."""
-    stmt = (
-        select(claim, invoice.c.lane_key, invoice.c.pro_number)
-        .join(invoice, invoice.c.id == claim.c.invoice_id)
-        .where(claim.c.status.notin_(CLOSED_STATUSES))
-    )
+ClaimStates = dict[uuid.UUID, dict[str, LineState]]
+
+
+def line_states(conn: Connection, invoice_id: uuid.UUID) -> dict[str, LineState]:
+    """One fresh run of the checks for an invoice against the basis confirmed now. The fuel index
+    value is compared by price, not row id, so a correction to the same price changes nothing."""
+    core_inv, inv, _ = load_invoice(conn, invoice_id)
+    ctx = load_context(conn, inv)
+    prices = {v.id: str(v.price.normalize()) for v in ctx.fuel_values}
+    out: dict[str, LineState] = {}
+    for r in run_checks(core_inv, ctx):
+        key = finding_key(r.check_code, r.line_no)
+        out[key] = LineState(
+            signature=(
+                r.status,
+                r.exception_code,
+                r.expected_cents,
+                r.variance_cents,
+                tuple(sorted(zip(r.basis.document_ids, r.basis.document_revisions, strict=True))),
+                # also present on a fuel exception (e.g. no linehaul base), so a corrected price shows
+                tuple(prices.get(i) for i in r.basis.fuel_index_price_ids),
+            ),
+            recomputed=Recomputed(key, r.status, r.variance_cents, r.basis.to_json()),
+            document_ids=r.basis.document_ids,
+            fuel_index_price_ids=r.basis.fuel_index_price_ids,
+        )
+    return out
+
+
+def _open_claims(conn: Connection, carrier_account_id: uuid.UUID | None, *, lock: bool = False) -> list[Row[Any]]:
+    stmt = select(claim).where(claim.c.status.notin_(CLOSED_STATUSES))
     if carrier_account_id is not None:
         stmt = stmt.where(claim.c.carrier_account_id == carrier_account_id)
+    if lock:
+        stmt = stmt.with_for_update()
+    return list(conn.execute(stmt.order_by(claim.c.created_at, claim.c.id)).all())
+
+
+def _claim_lines(c: Row[Any]) -> list[LineBasis]:
+    return [LineBasis(ln["key"], ln["claimed_cents"], ln["basis"]) for ln in (c.basis_snapshot or {}).get("lines", [])]
+
+
+def states_before(conn: Connection, carrier_account_id: uuid.UUID | None) -> ClaimStates:
+    """Call BEFORE a confirmation changes anything: the governing state of every claimed line of
+    the open claims of the carrier (of all carriers for a tenant-wide index value)."""
+    out: ClaimStates = {}
+    for c in _open_claims(conn, carrier_account_id):
+        states = line_states(conn, c.invoice_id)
+        out[c.id] = {ln.finding_key: states[ln.finding_key] for ln in _claim_lines(c) if ln.finding_key in states}
+    return out
+
+
+def _still_in_force(conn: Connection, state: LineState) -> bool:
+    """Every document and index value the line was computed from is still confirmed."""
+    docs = [uuid.UUID(i) for i in state.document_ids]
+    fuels = [uuid.UUID(i) for i in state.fuel_index_price_ids]
+    if (
+        docs
+        and conn.execute(
+            select(func.count()).where(rate_document.c.id.in_(docs), rate_document.c.status != "confirmed")
+        ).scalar_one()
+    ):
+        return False
+    return not (
+        fuels
+        and conn.execute(
+            select(func.count()).where(fuel_index_price.c.id.in_(fuels), fuel_index_price.c.status != "confirmed")
+        ).scalar_one()
+    )
+
+
+def line_changed(conn: Connection, snapshot: LineBasis, was: LineState | None, now: LineState | None) -> bool:
+    """B1-013 rule: did this confirmation change what governs this claimed line?
+
+    Yes only if, compared before and after, the governing document, its revision, the value used or
+    the computed amount differs, and the line no longer matches what the claim was drafted on. A
+    line that merely became undeterminable (an exception such as lane unknown after an unrelated
+    lane sheet) while the documents it was computed from are still in force is not a changed basis;
+    sending it is refused with BASIS_UNRESOLVED instead."""
+    if was is None or now is None or now.signature == was.signature:
+        return False
+    if now.recomputed.status == "exception" and _still_in_force(conn, was):
+        return False
+    return bool(compare_basis([snapshot], {snapshot.finding_key: now.recomputed}))
+
+
+def reevaluate_claims(conn: Connection, carrier_account_id: uuid.UUID | None, before: ClaimStates) -> dict[str, list[uuid.UUID]]:
+    """Call AFTER a confirmation (new document, revision, index value or correction) with the
+    states taken by `states_before`. Review round 3 (B1-013): a claim is marked only if one of its
+    own lines changed under `line_changed`; no difference means no flag, no withdrawal note and no
+    wrong-basis count. A fuel value for another week, or a document outside a line's dates, lane or
+    type, never touches a claim. A changed unsent claim becomes stale; a changed sent claim is
+    flagged basis_changed_after_send."""
     out: dict[str, list[uuid.UUID]] = {"stale": [], "changed_after_send": []}
-    for c in conn.execute(stmt.with_for_update(of=claim)).all():
-        if not document_governs(document, c) or not basis_changed(conn, c):
+    for c in _open_claims(conn, carrier_account_id, lock=True):
+        was = before.get(c.id)
+        if not was:
+            continue
+        now = line_states(conn, c.invoice_id)
+        if not any(line_changed(conn, ln, was.get(ln.finding_key), now.get(ln.finding_key)) for ln in _claim_lines(c)):
             continue
         if c.status in UNSENT_STATUSES:
             if not c.stale_basis:
@@ -374,14 +424,6 @@ def reevaluate_claims(
                 )
             )
             out["changed_after_send"].append(c.id)
-    return out
-
-
-def merge_marked(*parts: dict[str, list[uuid.UUID]]) -> dict[str, list[uuid.UUID]]:
-    out: dict[str, list[uuid.UUID]] = {"stale": [], "changed_after_send": []}
-    for p in parts:
-        for k, ids in p.items():
-            out[k] += [i for i in ids if i not in out[k]]
     return out
 
 

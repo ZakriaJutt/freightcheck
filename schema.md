@@ -89,7 +89,7 @@ Only fields beyond the conventions are listed. N = nullable.
 | | doc_type | text | no | `contract_rate_sheet`, `tariff`, `accessorial_schedule`, `fuel_schedule`, `rate_confirmation` |
 | | effective_from | date | no | |
 | | effective_to | date | yes | Check: null or after `effective_from` |
-| | scope_key | text | no | `'*'`; lane group or, for a rate confirmation, the PRO. A lane-scoped document applies to invoices with that `lane_key`; while an invoice's lane is unknown, a lane-scoped document that may govern blocks the check (review round 1, 2026-11-11). Confirming a lane document re-evaluates only claims on that lane; an entered revision blocks dates its confirmed prior does not cover (review round 2, 2026-11-11) |
+| | scope_key | text | no | `'*'`; lane group or, for a rate confirmation, the PRO. A lane-scoped document applies to invoices with that `lane_key`; while an invoice's lane is unknown, a lane-scoped document that may govern blocks the check (review round 1, 2026-11-11). Confirming a document marks only claims whose own lines it changes (TRD 6.2, review round 3, 2026-11-11); an entered revision blocks dates its confirmed prior does not cover (review round 2, 2026-11-11) |
 | | date_basis | text | no | `pickup_date`, `tender_date`, `delivery_date`, `invoice_date`; selects the governing date for every rule in the document |
 | | date_basis_source_page | int | yes | Null means the document is silent and the Approver chose; shown as a flag |
 | | revision | int | no | 1; a change to a confirmed document inserts a new row with revision + 1 and `revises_id`; not the optimistic-lock `version` |

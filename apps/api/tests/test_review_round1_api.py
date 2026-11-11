@@ -419,3 +419,71 @@ def test_b1_013_lane_document_revision_still_marks_claims_on_that_lane(world: Wo
     conf = p.approver.post(f"/api/v1/rate-documents/{rev['id']}/confirm", expect=200).json()
     assert conf["marked_claims"]["changed_after_send"] == [sent["id"]]
     assert p.approver.get(f"/api/v1/claims/{other['id']}").json()["basis_changed_after_send"] is False
+
+
+# ---------------------------------------------------------------- B1-013 review round 3 (case S1 and variants)
+
+NOTHING_MARKED = {"stale": [], "changed_after_send": []}
+
+
+def confirm_fuel_value(p: Pilot, published: str, price: str, revises: str | None = None) -> dict[str, Any]:
+    v = p.auditor.post(
+        "/api/v1/fuel-index",
+        {
+            "index_name": INDEX,
+            "week_start": published,
+            "price": price,
+            "published_on": published,
+            "source_note": "weekly index page, synthetic",
+            "revises_id": revises,
+        },
+        expect=201,
+    ).json()
+    return dict(p.approver.post(f"/api/v1/fuel-index/{v['id']}/confirm", expect=200).json())
+
+
+def lane_less_sent_claim_after_unrelated_lane_sheet(p: Pilot) -> dict[str, Any]:
+    """Sent on the wildcard contract with fuel 3.78 for the week published 9 Mar (pickup 14 Mar):
+    27.72 + 12.99 = 40.71. Then LANE-CHI-DET is confirmed: the invoice has no lane, nothing flagged."""
+    sent = p.sent_claim(p.invoice())
+    assert sent["claimed_cents"] == 4071
+    assert lane_sheet(p, "LANE-CHI-DET")["marked_claims"] == NOTHING_MARKED
+    return sent
+
+
+def assert_not_flagged(p: Pilot, claim_id: str) -> None:
+    s = p.approver.get(f"/api/v1/claims/{claim_id}").json()
+    assert s["basis_changed_after_send"] is False and s["stale_basis"] is False and s["banner"] is None
+    assert p.viewer.get("/api/v1/reports/basis-metrics").json()["wrong_basis_sent"] == 0
+
+
+def test_b1_013_s1_fuel_value_for_another_week_does_not_flag_lane_less_sent_claim(world: World) -> None:
+    """Reviewer case S1: the value published 16 Mar (3.79) governs pickups 17-23 Mar, not this 14 Mar pickup
+    (window 7-13 Mar keeps 3.78), so no line of the claim changes: no flag, no withdrawal note, metric 0."""
+    p = Pilot(world)
+    sent = lane_less_sent_claim_after_unrelated_lane_sheet(p)
+    assert confirm_fuel_value(p, "2026-03-16", "3.79")["marked_claims"] == NOTHING_MARKED
+    assert_not_flagged(p, sent["id"])
+
+
+def test_b1_013_same_week_fuel_correction_to_the_identical_value_flags_nothing(world: World) -> None:
+    """Variant: the 9 Mar value is corrected to 3.780, the same price as the 3.78 used (28.5%), so the value
+    used and every amount are unchanged: no flag, no withdrawal note, metric 0, with or without a lane."""
+    p = Pilot(world)
+    sent = lane_less_sent_claim_after_unrelated_lane_sheet(p)
+    laned = p.sent_claim(p.invoice(number="L-9", pro="PRO-L9", lane_key="LANE-STL-KC"))
+    assert confirm_fuel_value(p, "2026-03-09", "3.780", revises=p.fv_0309)["marked_claims"] == NOTHING_MARKED
+    assert_not_flagged(p, sent["id"])
+    assert_not_flagged(p, laned["id"])
+
+
+def test_b1_013_same_week_fuel_correction_to_a_different_value_flags_the_sent_claim(world: World) -> None:
+    """Variant: the 9 Mar value is corrected 3.78 -> 3.74 (band 28.5% -> 28.0%). The fuel line of this claim
+    was computed on 3.78, so the value used changed: flagged once, withdrawal note, metric 1."""
+    p = Pilot(world)
+    sent = lane_less_sent_claim_after_unrelated_lane_sheet(p)
+    conf = confirm_fuel_value(p, "2026-03-09", "3.74", revises=p.fv_0309)
+    assert conf["marked_claims"] == {"stale": [], "changed_after_send": [sent["id"]]}
+    s = p.approver.get(f"/api/v1/claims/{sent['id']}").json()
+    assert s["basis_changed_after_send"] is True and "withdrawal_note" in s["banner"]
+    assert p.viewer.get("/api/v1/reports/basis-metrics").json()["wrong_basis_sent"] == 1

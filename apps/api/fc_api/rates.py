@@ -182,7 +182,8 @@ def confirm_rate_document(doc_id: str, request: Request, ctx: Ctx = Depends(tena
                 validate_rule_params(r.rule_type, r.params)
             except RuleParamError as exc:
                 raise ApiError(422, "BAD_RULE", str(exc)) from exc
-        marked: dict[str, list[uuid.UUID]] = {"stale": [], "changed_after_send": []}
+        # B1-013: the governing state of every open claim line, taken before anything changes.
+        before = ops.states_before(ctx.conn, doc.carrier_account_id)
         if doc.revises_id is not None:
             prior = ctx.row(rate_document, doc.revises_id, for_update=True)
             if prior.status != "confirmed":
@@ -227,10 +228,8 @@ def confirm_rate_document(doc_id: str, request: Request, ctx: Ctx = Depends(tena
                 )
         except IntegrityError as exc:
             raise ApiError(409, "RATE_DOCUMENT_OVERLAP", "overlaps another confirmed document") from exc
-        if doc.revises_id is not None:
-            marked = ops.mark_dependent_claims(ctx.conn, prior_document_id=doc.revises_id)
-        # B1-001: a new document may now govern lines drafted on another one; re-evaluate them all.
-        marked = ops.merge_marked(marked, ops.reevaluate_claims(ctx.conn, doc.carrier_account_id, doc))
+        # B1-001, B1-013: mark only claims whose own lines actually changed, compared before and after.
+        marked = ops.reevaluate_claims(ctx.conn, doc.carrier_account_id, before)
         ops.audit(
             ctx.conn,
             tenant_id=ctx.tenant_id,
@@ -367,7 +366,8 @@ def confirm_fuel_index(value_id: str, request: Request, ctx: Ctx = Depends(tenan
         v = ctx.row(fuel_index_price, value_id, for_update=True)
         if v.status != "entered":
             raise ApiError(409, "NOT_ENTERED", f"value is {v.status}")
-        marked: dict[str, list[uuid.UUID]] = {"stale": [], "changed_after_send": []}
+        # B1-013: the governing state of every open claim line, taken before anything changes.
+        before = ops.states_before(ctx.conn, v.carrier_account_id)
         if v.revises_id is not None:
             prior = ctx.row(fuel_index_price, v.revises_id, for_update=True)
             if prior.status != "confirmed":  # B1-010: a racing correction already superseded it
@@ -394,10 +394,8 @@ def confirm_fuel_index(value_id: str, request: Request, ctx: Ctx = Depends(tenan
             raise ApiError(
                 409, "VALUE_ALREADY_CONFIRMED", "a confirmed value for this index and week exists; correct it instead"
             ) from exc
-        if v.revises_id is not None:
-            marked = ops.mark_dependent_claims(ctx.conn, prior_fuel_index_price_id=v.revises_id)
-        # B1-001: a new value may now be the one the week rule selects; re-evaluate open claims.
-        marked = ops.merge_marked(marked, ops.reevaluate_claims(ctx.conn, v.carrier_account_id))
+        # B1-001, B1-013: mark only claims whose own lines actually changed, compared before and after.
+        marked = ops.reevaluate_claims(ctx.conn, v.carrier_account_id, before)
         ops.audit(
             ctx.conn,
             tenant_id=ctx.tenant_id,
