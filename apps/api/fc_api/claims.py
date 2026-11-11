@@ -351,7 +351,14 @@ def mark_sent(claim_id: str, body: SentIn, request: Request, ctx: Ctx = Depends(
         if body.sent_on > today() or (approved_on is not None and body.sent_on < approved_on):
             raise ApiError(422, "BAD_SENT_ON", "sent_on must be between the approval date and today", field="sent_on")
         # B1-001: the basis must still be current at the moment the send is recorded.
-        if c.stale_basis or ops.basis_changed(ctx.conn, c):
+        changed = [] if c.stale_basis else ops.basis_changed(ctx.conn, c)
+        if changed and set(ops.unresolved_lines(ctx.conn, c)) == set(changed):
+            # B1-013: no governing rate changed; the basis can no longer be determined (e.g. a lane
+            # document now exists and the invoice lane is unknown). Fail closed, but say why.
+            raise ApiError(
+                409, "BASIS_UNRESOLVED", "a claimed line's governing document cannot be determined; key the missing input"
+            )
+        if c.stale_basis or changed:
             raise ApiError(
                 409, "STALE_BASIS", "the basis changed after approval; redraft and approve again", claim=claim_out(ctx, c.id)
             )

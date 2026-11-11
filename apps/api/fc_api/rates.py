@@ -230,7 +230,7 @@ def confirm_rate_document(doc_id: str, request: Request, ctx: Ctx = Depends(tena
         if doc.revises_id is not None:
             marked = ops.mark_dependent_claims(ctx.conn, prior_document_id=doc.revises_id)
         # B1-001: a new document may now govern lines drafted on another one; re-evaluate them all.
-        marked = ops.merge_marked(marked, ops.reevaluate_claims(ctx.conn, doc.carrier_account_id))
+        marked = ops.merge_marked(marked, ops.reevaluate_claims(ctx.conn, doc.carrier_account_id, doc))
         ops.audit(
             ctx.conn,
             tenant_id=ctx.tenant_id,

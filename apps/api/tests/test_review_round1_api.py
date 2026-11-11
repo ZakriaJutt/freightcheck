@@ -98,8 +98,16 @@ def test_b2_send_after_contest_by_needs_override_with_approver(world: World, mon
     assert p.viewer.get("/api/v1/reports/basis-metrics").json()["approvals_by_date_override"] == 1
 
 
-def test_sweep_expires_unsent_claims_past_contest_by_and_reminds_once(world: World, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_sweep_marks_past_contest_by_reminds_once_and_override_stays_reachable(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B1-014 (round 2, reviewer case R1): the sweep marks a draft past contest-by; approval with a typed
+    reason still succeeds, and the send then needs no second reason because the approval carried one."""
     from datetime import date
+
+    from sqlalchemy import text
+
+    from fc_platform.tenant import tenant_transaction
 
     p = Pilot(world)
     draft = p.draft_claim(p.invoice())  # contest-by 12 Sep 2026
@@ -107,20 +115,21 @@ def test_sweep_expires_unsent_claims_past_contest_by_and_reminds_once(world: Wor
     assert enqueue_daily_sweeps(engine, date(2026, 9, 9)) >= 1  # 3 days left
     assert enqueue_daily_sweeps(engine, date(2026, 9, 9)) == 0  # idempotent per run date
     run_worker()
-    run_worker()
     set_today(monkeypatch, "2026-09-13")
     enqueue_daily_sweeps(engine, date(2026, 9, 13))
     run_worker()
     c = p.approver.get(f"/api/v1/claims/{draft['id']}").json()
-    assert c["status"] == "expired" and c["events"][-1]["event_type"] == "expired"
-    assert (
-        p.approver.post(f"/api/v1/claims/{draft['id']}/approve", {"override_reason": "x"}, expect=409).json()["code"]
-        == "NOT_DRAFT"
-    )
-    from sqlalchemy import text
-
-    from fc_platform.tenant import tenant_transaction
-
+    assert (c["status"], c["past_contest_by"]) == ("draft", True)
+    assert p.approver.post(f"/api/v1/claims/{draft['id']}/approve", {}, expect=409).json()["code"] == "PAST_CONTEST_BY"
+    ok = p.approver.post(
+        f"/api/v1/claims/{draft['id']}/approve", {"override_reason": "carrier agreed in writing"}, expect=200
+    ).json()
+    assert ok["status"] == "approved"
+    enqueue_daily_sweeps(engine, date(2026, 9, 14))
+    run_worker()
+    assert p.approver.get(f"/api/v1/claims/{draft['id']}").json()["status"] == "approved"
+    set_today(monkeypatch, "2026-09-14")
+    p.approver.post(f"/api/v1/claims/{draft['id']}/sent", {"sent_on": "2026-09-14", "sent_to": "x@carrier.example"}, expect=200)
     with tenant_transaction(engine, p.tenant_id) as conn:
         kinds = conn.execute(text("select kind from notification")).scalars().all()
     assert kinds == ["deadline_3"]
@@ -344,3 +353,69 @@ def test_unexpected_error_returns_json_with_correlation_id(world: World, monkeyp
         "message": "unexpected error; quote the correlation ID",
         "correlation_id": "b1010corr",
     }
+
+
+def lane_sheet(p: Pilot, lane: str, rate: str = "40.00") -> dict[str, Any]:
+    src = upload(p.auditor, "rate_document", f"lane-{lane}-{rate}")
+    d = p.auditor.post(
+        "/api/v1/rate-documents",
+        {
+            "carrier_account_id": p.carrier_id,
+            "doc_type": "contract_rate_sheet",
+            "effective_from": "2026-01-01",
+            "scope_key": lane,
+            "date_basis": "pickup_date",
+            "date_basis_source_page": 1,
+            "source_file_id": src,
+        },
+        expect=201,
+    ).json()
+    p.auditor.post(
+        f"/api/v1/rate-documents/{d['id']}/rules",
+        {
+            "rules": [
+                {"rule_type": "linehaul", "params": {"basis": "per_cwt", "rate": rate, "class": "70"}},
+                {"rule_type": "discount", "params": {"percent": "62"}},
+            ]
+        },
+        expect=201,
+    )
+    return dict(p.approver.post(f"/api/v1/rate-documents/{d['id']}/confirm", expect=200).json())
+
+
+def test_b1_013_unrelated_lane_document_marks_nothing_and_unresolved_send_says_why(world: World) -> None:
+    """Reviewer case R5: confirming LANE-CHI-DET must not flag lane-less claims (no withdrawal note, metric 0).
+    An approved lane-less claim cannot be sent while its basis is unresolvable: 409 BASIS_UNRESOLVED."""
+    p = Pilot(world)
+    sent = p.sent_claim(p.invoice())
+    approved = p.approved_claim(p.invoice(number="884502", pro="PRO-5550502"))
+    conf = lane_sheet(p, "LANE-CHI-DET")
+    assert conf["marked_claims"] == {"stale": [], "changed_after_send": []}
+    s = p.approver.get(f"/api/v1/claims/{sent['id']}").json()
+    assert s["basis_changed_after_send"] is False and s["banner"] is None
+    assert p.viewer.get("/api/v1/reports/basis-metrics").json()["wrong_basis_sent"] == 0
+    r = p.approver.post(f"/api/v1/claims/{approved['id']}/sent", SENT, expect=409).json()
+    assert r["code"] == "BASIS_UNRESOLVED"
+
+
+def test_b1_013_lane_document_revision_still_marks_claims_on_that_lane(world: World) -> None:
+    """Lane sheet 40.00/cwt (182.40, variance 20.88) revised to 41.00/cwt: 12 × 41.00 = 492.00 × 0.38 = 186.96."""
+    p = Pilot(world)
+    lane = lane_sheet(p, "LANE-CHI-DET")
+    sent = p.sent_claim(p.invoice(number="L-1", pro="PRO-L1", lane_key="LANE-CHI-DET"))
+    other = p.sent_claim(p.invoice(number="L-2", pro="PRO-L2", lane_key="LANE-STL-KC"))
+    rev = p.auditor.post(f"/api/v1/rate-documents/{lane['id']}/revise", {}, expect=201).json()
+    p.auditor.post(
+        f"/api/v1/rate-documents/{rev['id']}/rules",
+        {
+            "replace": True,
+            "rules": [
+                {"rule_type": "linehaul", "params": {"basis": "per_cwt", "rate": "41.00", "class": "70"}},
+                {"rule_type": "discount", "params": {"percent": "62"}},
+            ],
+        },
+        expect=201,
+    )
+    conf = p.approver.post(f"/api/v1/rate-documents/{rev['id']}/confirm", expect=200).json()
+    assert conf["marked_claims"]["changed_after_send"] == [sent["id"]]
+    assert p.approver.get(f"/api/v1/claims/{other['id']}").json()["basis_changed_after_send"] is False
