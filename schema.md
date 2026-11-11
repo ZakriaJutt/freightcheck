@@ -46,7 +46,7 @@ erDiagram
 
 ## 2. Conventions
 
-Every table has `id uuid` primary key (default `gen_random_uuid()`) and, except `tenant`, `app_user` and the three per-user tables (`user_session`, `auth_token`, `recovery_code`), `tenant_id uuid not null` referencing `tenant`; every table has `created_at timestamptz not null default now()`. Mutable tables add `updated_at` and `version int not null default 1` for optimistic locking. Money is `bigint` cents with a `currency char(3) not null default 'USD' check (currency = 'USD')`. Rates are `numeric(12,4)`, percentages `numeric(7,4)`. Every foreign key is composite with `tenant_id` so a child cannot point into another tenant. Enumerations are `text` with `check` constraints.
+Every table has `id uuid` primary key (default `gen_random_uuid()`) and, except `tenant`, `app_user`, the three per-user tables (`user_session`, `auth_token`, `recovery_code`) and the sign-in attempt log `auth_attempt` (B2), `tenant_id uuid not null` referencing `tenant`; every table has `created_at timestamptz not null default now()`. Mutable tables add `updated_at` and `version int not null default 1` for optimistic locking. Money is `bigint` cents with a `currency char(3) not null default 'USD' check (currency = 'USD')`. Rates are `numeric(12,4)`, percentages `numeric(7,4)`. Every foreign key is composite with `tenant_id` so a child cannot point into another tenant. Enumerations are `text` with `check` constraints.
 
 ## 3. Dictionary
 
@@ -64,10 +64,11 @@ Only fields beyond the conventions are listed. N = nullable.
 | | sender_domains | text[] | no | `'{}'` |
 | | inbox_token | text | no | Unique, random; forms the forwarding address |
 | | deleted_at | timestamptz | yes | |
-| app_user | id, email (citext unique), password_hash, totp_secret_enc, totp_last_step (bigint, a step is accepted once), failed_count, locked_until | | | No `tenant_id`; global |
-| user_session | user_id, active_tenant_id, token_hash (unique), created_at, last_seen_at, expires_at, revoked_at | | | No `tenant_id` and no RLS; server-side session. `active_tenant_id` (B1 addition, 2026-11-11) is the tenant chosen at sign-in; the API sets `app.tenant_id` from it and then reads the membership under RLS |
-| auth_token | user_id, purpose (`invite`, `reset`), token_hash (unique), expires_at, used_at, invited_tenant_id, invited_role | | | Single use; invitation 7 days, reset 30 minutes |
-| recovery_code | user_id, code_hash, used_at | | | Ten per user; unique (user_id, code_hash) |
+| app_user | id, email (citext unique), password_hash, totp_secret_enc, totp_last_step (bigint, a step is accepted once), totp_enrolled_at, failed_count, locked_until | | | No `tenant_id`; global. Migration 0004 (B2, 2026-11-11): `password_hash` (argon2id) nullable, null until an invited user sets it (B1 placeholders cleared to null); `totp_secret_enc` is AES-256-GCM under `FC_DATA_KEY` with the user id as associated data; `totp_enrolled_at` set when the factor is confirmed, so a seed without it is an unfinished enrolment |
+| user_session | user_id, active_tenant_id, token_hash (unique), stage, created_at, last_seen_at, expires_at, revoked_at | | | No `tenant_id` and no RLS; server-side session. `active_tenant_id` (B1 addition, 2026-11-11) is the tenant chosen at sign-in; the API sets `app.tenant_id` from it and then reads the membership under RLS. `stage` (migration 0004, B2): `password`, `enrol` or `full`; only `full` reaches tenant data; pending stages last 10 minutes, `full` 12 hours absolute and 30 minutes idle by `last_seen_at`; sessions open before 0004 were revoked. Index on `user_id` |
+| auth_token | user_id, purpose (`invite`, `reset`), token_hash (unique), expires_at, used_at, invited_tenant_id, invited_role, invited_by | | | Single use; invitation 7 days, reset 30 minutes. Check: an `invite` row has a tenant and a role, a `reset` row has neither. A new invitation to the same tenant or a new reset voids the earlier unused one. Built in migration 0004 (B2); `invited_by` added there |
+| recovery_code | user_id, code_hash, used_at | | | Ten per user; unique (user_id, code_hash); SHA-256 of 80-bit codes. Built in migration 0004 (B2) |
+| auth_attempt | email (citext), kind (`password`, `code`, `reset_request`, `invitation`), succeeded, created_at | | | B2 addition (migration 0004): one row per sign-in attempt for the 20-an-hour per-address limit (TRD 8.1); no RLS, no tenant; holds the address only, never what was typed; rows older than 24 hours are deleted on the next attempt for the address. Index (email, created_at) |
 | idempotency_record | key, route, request_hash, response_status, response_body, expires_at | | | Unique (tenant_id, route, key); kept 24 hours |
 | notification | kind (`deadline_30`, `deadline_14`, `deadline_3`, `carrier_overdue`), entity_id, sent_at | | | Unique (tenant_id, kind, entity_id) so a reminder is sent once. Built in migration 0002 with forced RLS; the daily sweep job is enqueued per tenant by the `SECURITY DEFINER` function `fc_enqueue_deadline_sweeps(date)` (review round 1, 2026-11-11) |
 | membership | user_id | uuid | no | FK `app_user` |
@@ -234,6 +235,8 @@ Only fields beyond the conventions are listed. N = nullable.
 | Time entries | write | own | own | read | none | none |
 | Reports, fee statements | read | read | read | read | none | write |
 | Audit events | read | none | none | none | none | insert |
+
+Sign-in lookup (B2): `fc_user_tenants(user_id)` is a `SECURITY DEFINER` function returning only the (tenant, role) pairs of one user in live tenants; the password step uses it to choose the session's tenant before any tenant context exists.
 
 Tenant boundary: RLS policy `tenant_id = current_setting('app.tenant_id')::uuid` on every tenant table, forced for the application role; the setting is unset by default, so a query without context returns nothing. Uniqueness is scoped to the tenant in every constraint above; invoice numbers, references and file hashes may repeat across tenants. Cross-tenant denial: a foreign ID yields no row, the API answers 404, and storage keys are derived from the row, never from user input. The migration role is separate from the application role.
 

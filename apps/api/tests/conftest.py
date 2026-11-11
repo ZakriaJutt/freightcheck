@@ -1,5 +1,9 @@
 """Integration harness: real Postgres (freightcheck_test), app role for every request and
-isolation read, owner role only to seed fixtures and to truncate between tests."""
+isolation read, owner role only to seed fixtures and to truncate between tests.
+
+`World.user` writes a signed-in session row directly: the B1 stand-in for sign-in, kept only
+here so the core-path tests do not each walk the sign-in flow. B2 sign-in itself is tested end
+to end in test_b2_sign_in.py through the real endpoints, Mailpit and MinIO."""
 
 from __future__ import annotations
 
@@ -19,6 +23,7 @@ TEST_ENV = {
     "FC_MIGRATION_DATABASE_URL": "postgresql+psycopg://zakria@localhost:5432/freightcheck_test",
     "FC_PUBLIC_BASE_URL": "http://localhost:8102",
     "FC_SIGNING_KEY": "test-signing-key-" + "0" * 32,
+    "FC_DATA_KEY": "11" * 32,
     "FC_LOG_LEVEL": "INFO",
     "FC_FIXED_TODAY": "2026-04-01",
 }
@@ -30,8 +35,9 @@ from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy import create_engine, text  # noqa: E402
 
 from fc_api.app import create_app  # noqa: E402
-from fc_api.core import token_hash  # noqa: E402
+from fc_api.core import CSRF_HEADER, SESSION_COOKIE, token_hash  # noqa: E402
 from fc_db.tables import app_user, membership, tenant, user_session  # noqa: E402
+from fc_platform.auth import csrf_token  # noqa: E402
 from fc_platform.settings import reset_settings_cache  # noqa: E402
 
 OWNER_URL = TEST_ENV["FC_MIGRATION_DATABASE_URL"]
@@ -62,7 +68,8 @@ def clean(owner_engine, tmp_path, monkeypatch):  # type: ignore[no-untyped-def]
     monkeypatch.setenv("FC_STORAGE_DIR", str(tmp_path / "storage"))
     reset_settings_cache()
     with owner_engine.begin() as c:
-        c.execute(text("TRUNCATE tenant, app_user CASCADE"))
+        c.execute(text("SET LOCAL lock_timeout = '10s'"))  # fail, never hang, if a test leaks a lock
+        c.execute(text("TRUNCATE tenant, app_user, auth_attempt CASCADE"))
     yield
     reset_settings_cache()
 
@@ -113,9 +120,7 @@ class World:
         token = secrets.token_urlsafe(24)
         with self.owner.begin() as c:
             uid = c.execute(
-                app_user.insert()
-                .values(email=f"{role}-{secrets.token_hex(4)}@shipper.example", password_hash="unset-in-b1")
-                .returning(app_user.c.id)
+                app_user.insert().values(email=f"{role}-{secrets.token_hex(4)}@shipper.example").returning(app_user.c.id)
             ).scalar_one()
             c.execute(membership.insert().values(tenant_id=tenant_id, user_id=uid, role=role))
             c.execute(
@@ -123,11 +128,13 @@ class World:
                     user_id=uid,
                     active_tenant_id=tenant_id,
                     token_hash=token_hash(token),
+                    stage="full",
                     expires_at=datetime.now(UTC) + timedelta(hours=12),
                 )
             )
-        client = TestClient(self.app, raise_server_exceptions=True)
-        client.cookies.set("fc_session", token)
+        client = TestClient(self.app, base_url="https://testserver", raise_server_exceptions=True)
+        client.cookies.set(SESSION_COOKIE, token)
+        client.headers[CSRF_HEADER] = csrf_token(token, TEST_ENV["FC_SIGNING_KEY"])
         return Api(client, tenant_id, uid, role)
 
 

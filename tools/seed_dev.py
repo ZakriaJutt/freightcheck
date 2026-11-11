@@ -1,22 +1,24 @@
-"""Seed one synthetic tenant with an Approver session for local use (idempotent).
+"""Seed one synthetic tenant and invite its first Owner by email (idempotent; B2).
 
-B1 has no sign-in endpoints (T-2.2.3 not built); this writes a dev-only session and stores
-its cookie in the git-ignored `.local/dev-session.txt` (mode 0600). It prints the value only
-with `--print-session` (B1-012). Synthetic names only. Refuses to run outside FC_ENV=dev.
+Since B2 there is no dev-only session: the invitation goes through SMTP to the local Mailpit
+inbox (http://127.0.0.1:8025). Open it, accept it at POST /api/v1/auth/invitations/accept, and
+enrol an authenticator, exactly as a pilot user would. A new invitation is sent only while
+the Owner has not yet set a password. Synthetic names only. Refuses to run outside FC_ENV=dev.
 """
 
 from __future__ import annotations
 
-import hashlib
 import secrets
-import sys
-from datetime import UTC, datetime, timedelta
-from pathlib import Path
 
 from sqlalchemy import create_engine, select
 
-from fc_db.tables import app_user, membership, tenant, user_session
+from fc_db.identity import INVITE_BODY, INVITE_SUBJECT, invitation_link, issue_invitation
+from fc_db.tables import app_user, tenant
+from fc_platform.mail import mailer_from_settings
 from fc_platform.settings import get_settings
+
+TENANT_NAME = "Synthetic Shipper (dev)"
+OWNER_EMAIL = "owner@shipper.example"
 
 
 def main() -> None:
@@ -25,37 +27,23 @@ def main() -> None:
         raise SystemExit("seed_dev runs only with FC_ENV=dev")
     eng = create_engine(s.migration_database_url)
     with eng.begin() as c:
-        tid = c.execute(select(tenant.c.id).where(tenant.c.name == "Synthetic Shipper (dev)")).scalar_one_or_none()
+        tid = c.execute(select(tenant.c.id).where(tenant.c.name == TENANT_NAME)).scalar_one_or_none()
         if tid is None:
             tid = c.execute(
                 tenant.insert()
-                .values(name="Synthetic Shipper (dev)", plan="pilot_gainshare", inbox_token=secrets.token_hex(8))
+                .values(name=TENANT_NAME, plan="pilot_gainshare", inbox_token=secrets.token_hex(8))
                 .returning(tenant.c.id)
             ).scalar_one()
-        uid = c.execute(select(app_user.c.id).where(app_user.c.email == "approver@shipper.example")).scalar_one_or_none()
-        if uid is None:
-            uid = c.execute(
-                app_user.insert().values(email="approver@shipper.example", password_hash="unset-in-b1").returning(app_user.c.id)
-            ).scalar_one()
-            c.execute(membership.insert().values(tenant_id=tid, user_id=uid, role="approver"))
-        token = secrets.token_urlsafe(24)
-        c.execute(
-            user_session.insert().values(
-                user_id=uid,
-                active_tenant_id=tid,
-                token_hash=hashlib.sha256(token.encode()).digest(),
-                expires_at=datetime.now(UTC) + timedelta(hours=12),
-            )
-        )
-    out = Path(__file__).resolve().parents[1] / ".local" / "dev-session.txt"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.touch(mode=0o600, exist_ok=True)
-    out.chmod(0o600)
-    out.write_text(f"fc_session={token}\n")
-    if "--print-session" in sys.argv:
-        print(f"dev session cookie: fc_session={token}")
-    else:
-        print(f"dev session cookie written to {out.relative_to(out.parents[1])}")
+        has_password = c.execute(
+            select(app_user.c.password_hash.is_not(None)).where(app_user.c.email == OWNER_EMAIL)
+        ).scalar_one_or_none()
+        if has_password:
+            print(f"owner {OWNER_EMAIL} already set a password; sign in at POST /api/v1/auth/login")
+            return
+        inv = issue_invitation(c, tid, OWNER_EMAIL, "owner", None)
+        body = INVITE_BODY.format(tenant_name=TENANT_NAME, role="owner", link=invitation_link(s.public_base_url, inv.token))
+        mailer_from_settings(s).send(OWNER_EMAIL, INVITE_SUBJECT, body, kind="invitation")
+    print(f"invitation for {OWNER_EMAIL} sent to the local Mailpit inbox: http://127.0.0.1:8025")
 
 
 if __name__ == "__main__":

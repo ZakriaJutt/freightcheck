@@ -1,6 +1,6 @@
 # CLAUDE.md — FreightCheck
 
-Read [AGENTS.md](AGENTS.md) first; it is canonical. This file adds product guidance only. Build milestone B1 exists (see the AGENTS.md state line); commands not marked there as existing are proposed.
+Read [AGENTS.md](AGENTS.md) first; it is canonical. This file adds product guidance only. Build milestones B1 and B2 exist (see the AGENTS.md state line); commands not marked there as existing are proposed.
 
 ## The buyer's workflow
 
@@ -36,7 +36,7 @@ No regulated personal data is expected, but treat names and emails of carrier an
 
 ## First verification checks when implementation begins
 
-Run in this order. B1 results (commands and counts) are in [verification-report-fixing.md](verification-report-fixing.md#9-build-milestone-b1-2026-11-11); items not listed there as passed stay `Not run`:
+Run in this order. B1 and B2 results (commands and counts) are in [verification-report-fixing.md](verification-report-fixing.md#9-build-milestone-b1-2026-11-11) sections 9 and 10; items not listed there as passed stay `Not run`:
 
 1. IT-01 cross-tenant denial on API, worker and file links.
 2. UT-06 exception semantics: an exception never yields `clean` and never stops other checks.

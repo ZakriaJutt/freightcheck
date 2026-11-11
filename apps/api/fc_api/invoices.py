@@ -25,19 +25,23 @@ from fc_platform.storage import (
     MAX_BYTES,
     PURPOSES,
     FakeScanner,
-    LocalFakeStorage,
+    ObjectStorage,
     signed_url,
     sniff_mime,
     storage_key,
+    tenant_of_key,
     verify,
 )
+from fc_platform.tenant import tenant_transaction
 
 router = APIRouter()
 api = APIRouter(prefix="/api/v1")
 
 
-def storage() -> LocalFakeStorage:
-    return LocalFakeStorage(get_settings().storage_dir)
+def storage(request: Request) -> ObjectStorage:
+    """The app's object storage (S3 API to MinIO locally since B2, or the local fake)."""
+    st: ObjectStorage = request.app.state.storage
+    return st
 
 
 @api.post("/files")
@@ -67,7 +71,7 @@ async def upload_file(
         if existing is not None:
             return 200, {**jsonable(existing, exclude=("sha256", "storage_key")), "duplicate": True}
         key = storage_key(ctx.tenant_id, purpose, "upload")
-        storage().put(key, data)
+        storage(request).put(key, data)
         row = ctx.conn.execute(
             source_file.insert()
             .values(
@@ -95,13 +99,22 @@ def file_url(file_id: str, ctx: Ctx = Depends(tenant_ctx)) -> dict[str, str]:
 
 
 @router.get("/files/raw")
-def file_raw(k: str, e: int, s: str) -> Response:
+def file_raw(k: str, e: int, s: str, request: Request) -> Response:
     settings = get_settings()
     if not verify(k, e, s, int(time.time()), settings.signing_key):
         raise ApiError(404, "NOT_FOUND", "link expired or invalid")
-    # The key was issued under RLS by file_url; only the HMAC signature grants access.
+    # The key was issued under RLS by file_url and is HMAC-signed. B2: the file row must still
+    # exist under the key's own tenant context, so a deleted file's link stops working.
+    try:
+        tid = tenant_of_key(k)
+    except ValueError:
+        raise ApiError(404, "NOT_FOUND", "link expired or invalid") from None
+    with tenant_transaction(request.app.state.engine, tid) as conn:
+        found = conn.execute(select(source_file.c.id).where(source_file.c.storage_key == k)).first()
+    if found is None:
+        raise ApiError(404, "NOT_FOUND", "link expired or invalid")
     return Response(
-        storage().get(k),
+        storage(request).get(k),
         media_type="application/octet-stream",
         headers={"Content-Disposition": 'attachment; filename="document"'},
     )

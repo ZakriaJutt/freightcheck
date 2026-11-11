@@ -1,4 +1,4 @@
-"""Storage keys, signed URLs and the object-storage interface (T-2.2.5, R-13, R-16).
+"""Storage keys, signed URLs and the object-storage interface (T-2.2.5, R-13, R-16; S3 backend B2).
 
 Keys are built only here: `t/{tenant}/{purpose}/{source}/{uuid}`. The user's file name
 never appears in a key. Signed URLs carry only the opaque key and an expiry and always
@@ -13,6 +13,8 @@ import uuid
 from pathlib import Path
 from typing import Protocol
 from urllib.parse import quote
+
+from fc_platform.settings import Settings
 
 PURPOSES = frozenset(
     {
@@ -60,6 +62,51 @@ def verify(key: str, expires_epoch: int, signature: str, now_epoch: int, secret:
 class ObjectStorage(Protocol):
     def put(self, key: str, data: bytes) -> None: ...
     def get(self, key: str) -> bytes: ...
+    def delete(self, key: str) -> None: ...
+
+
+def tenant_of_key(key: str) -> uuid.UUID:
+    """The tenant a key belongs to; raises ValueError for anything not built by storage_key."""
+    parts = key.split("/")
+    if len(parts) != 5 or parts[0] != "t" or parts[2] not in PURPOSES or parts[3] not in SOURCES:
+        raise ValueError("not a storage key")
+    uuid.UUID(parts[4])
+    return uuid.UUID(parts[1])
+
+
+class S3Storage:
+    """S3 API client (B2): MinIO locally, a managed private bucket later. Objects are never
+    public; reads go through the API's signed `/files/raw` link only (TRD 8.5)."""
+
+    def __init__(self, endpoint: str, region: str, bucket: str, access_key: str, secret_key: str) -> None:
+        import boto3
+        from botocore.config import Config
+
+        self.bucket = bucket
+        self.client = boto3.client(
+            "s3",
+            endpoint_url=endpoint or None,
+            region_name=region,
+            aws_access_key_id=access_key,
+            aws_secret_access_key=secret_key,
+            config=Config(signature_version="s3v4", s3={"addressing_style": "path"}, retries={"max_attempts": 3}),
+        )
+
+    def put(self, key: str, data: bytes) -> None:
+        self.client.put_object(Bucket=self.bucket, Key=key, Body=data, ContentType="application/octet-stream")
+
+    def get(self, key: str) -> bytes:
+        body: bytes = self.client.get_object(Bucket=self.bucket, Key=key)["Body"].read()
+        return body
+
+    def delete(self, key: str) -> None:
+        self.client.delete_object(Bucket=self.bucket, Key=key)
+
+    def keys(self, prefix: str) -> list[str]:
+        out: list[str] = []
+        for page in self.client.get_paginator("list_objects_v2").paginate(Bucket=self.bucket, Prefix=prefix):
+            out += [o["Key"] for o in page.get("Contents", []) if "Key" in o]
+        return out
 
 
 class LocalFakeStorage:
@@ -80,6 +127,17 @@ class LocalFakeStorage:
 
     def get(self, key: str) -> bytes:
         return self._path(key).read_bytes()
+
+    def delete(self, key: str) -> None:
+        self._path(key).unlink(missing_ok=True)
+
+
+def storage_from_settings(settings: Settings) -> ObjectStorage:
+    if settings.storage_backend == "s3":
+        return S3Storage(
+            settings.s3_endpoint, settings.s3_region, settings.s3_bucket, settings.s3_access_key, settings.s3_secret_key
+        )
+    return LocalFakeStorage(settings.storage_dir)
 
 
 class Scanner(Protocol):

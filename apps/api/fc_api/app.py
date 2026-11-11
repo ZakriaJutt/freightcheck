@@ -11,20 +11,26 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from fc_api import claims, invoices, rates
+from fc_api import auth, claims, invoices, rates, users
 from fc_api.core import ApiError, error_body
 from fc_platform.db import engine_for
 from fc_platform.logging import configure_logging, correlation_id, log
+from fc_platform.mail import Mailer, mailer_from_settings
 from fc_platform.settings import Settings, get_settings
+from fc_platform.storage import ObjectStorage, storage_from_settings
 
 logger = logging.getLogger("fc_api")
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None, *, mailer: Mailer | None = None, storage: ObjectStorage | None = None
+) -> FastAPI:
     settings = settings or get_settings()
     configure_logging(settings.log_level)
     app = FastAPI(title="FreightCheck API", version="0.1.0")
     app.state.engine = engine_for(settings.database_url)
+    app.state.mailer = mailer or mailer_from_settings(settings)
+    app.state.storage = storage or storage_from_settings(settings)
 
     @app.middleware("http")
     async def correlation(request: Request, call_next):  # type: ignore[no-untyped-def]
@@ -42,6 +48,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 )
             log(logger, "request", method=request.method, path=request.url.path, status=response.status_code)
             response.headers["X-Correlation-ID"] = cid
+            # Responses carry tenant data or credentials: never cached (ASVS V14.3.2).
+            response.headers.setdefault("Cache-Control", "no-store")
+            response.headers["X-Content-Type-Options"] = "nosniff"
             return response
         finally:
             correlation_id.reset(token)
@@ -76,6 +85,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return JSONResponse({"status": "not_ready", "database": "not migrated"}, status_code=503)
         return JSONResponse({"status": "ready", "schema": head})
 
+    app.include_router(auth.router)
+    app.include_router(users.api)
     app.include_router(rates.router)
     app.include_router(invoices.api)
     app.include_router(invoices.router)

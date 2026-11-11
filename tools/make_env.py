@@ -1,4 +1,4 @@
-"""Write .env.local (git-ignored) from tools/env.example with a fresh random signing key."""
+"""Write .env.local (git-ignored) from tools/env.example with fresh random signing and data keys."""
 
 from __future__ import annotations
 
@@ -14,7 +14,8 @@ def main() -> None:
         print(".env.local exists; left unchanged")
         return
     text = (ROOT / "tools" / "env.example").read_text()
-    target.write_text(text.replace("replace-with-random-64-hex", secrets.token_hex(32)))
+    text = text.replace("replace-with-random-64-hex", secrets.token_hex(32))
+    target.write_text(text.replace("replace-with-random-data-key", secrets.token_hex(32)))
     target.chmod(0o600)
     print("wrote .env.local")
 

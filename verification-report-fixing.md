@@ -5,7 +5,7 @@
 | Item | Status |
 |---|---|
 | Documents | Ten files written by Author A on 2026-11-10 |
-| Application | Build milestone B1 on branch `feat/b1-foundation` (2026-11-11), not pushed, not independently reviewed. Results in [section 9](#9-build-milestone-b1-2026-11-11); every check not listed there as passed stays `Not run` |
+| Application | Build milestone B1 on branch `feat/b1-foundation` (2026-11-11) and B2 (sign-in, local mail and storage) on `feat/b2-local-auth` (2026-11-11, not pushed, not independently reviewed). Results in [section 9](#9-build-milestone-b1-2026-11-11) and [section 10](#10-build-milestone-b2-2026-11-11); every check not listed there as passed stays `Not run` |
 | Independent review | Round 1 done on 2026-11-10: 17 findings (0 blocker, 12 major, 5 minor). Fixes recorded in section 6. Retest on 2026-11-10 (`freightcheck-round2.md`): 13 closed, 0 still open, 4 open by design (F-004, F-005, F-009, F-017), no new findings; verdicts transcribed into section 6 by the lead |
 | Customer evidence | None. No interview, audit, message or payment |
 | Highest-consequence failure | **Wrong-basis dispute sent** ([PRD.md](PRD.md#11-highest-cost-user-mistakes)) |
@@ -33,7 +33,7 @@ Definitions: [execution-plan.md](execution-plan.md#7-test-catalogue). B1 results
 | Group | IDs | Status |
 |---|---|---|
 | Unit | UT-01 to UT-15 | B1: UT-01 to UT-11, UT-13, UT-15 passed; UT-12, UT-14 Not run |
-| Integration | IT-01 to IT-22 | B1: IT-01, IT-06, IT-07, IT-08, IT-13, IT-16, IT-19, IT-20 passed; IT-17 partly (single head only); others Not run |
+| Integration | IT-01 to IT-22 | B1: IT-01, IT-06, IT-07, IT-08, IT-13, IT-16, IT-19, IT-20 passed; IT-17 partly (single head only). B2: IT-15 passed; IT-22 partly (sign-in parts; intake parts Not run); IT-01 extended to file links in MinIO and to member endpoints. Others Not run |
 | End-to-end | E2E-01 to E2E-08 | Not run in a browser. E2E-02 passed in an API-level form only |
 | Manual accessibility checks | [design.md](design.md#7-accessibility-map) | Not run |
 | Security checks against the ASVS list | [TRD.md](TRD.md#84-security-controls-and-accepted-gaps) | Not run |
@@ -372,3 +372,48 @@ Current results (`make test-db`, clean test database, head `0003`): `make test-u
 Documents changed: TRD.md 6.2 (per-line before-and-after re-evaluation), schema.md (`scope_key` note), AGENTS.md (utilities index).
 
 Known limit, not changed: an approved, unsent claim whose fuel value is corrected to the same price is not marked stale, but send still compares the stored basis by value id and refuses with `STALE_BASIS`; redraft resolves it (fails closed). From code reading; not tested.
+
+## 10. Build milestone B2 (2026-11-11)
+
+Owner request of 2026-11-11: build what needs no external account. Branch `feat/b2-local-auth` from `feat/b1-foundation` at `73ede8f`. No Step 0 item was named for this repository; `stash@{0}` on `feat/b1-foundation` was left untouched.
+
+**Built.**
+
+| Task | What exists |
+|---|---|
+| T-2.2.3 (sign-in part) | Password plus TOTP as AD-07 and TRD 8.1 specify; no email-link sign-in. `/auth/login`, `/auth/totp` (code or recovery code), `/auth/totp/enrol`, `/auth/totp/confirm` (issues ten recovery codes), `/auth/recovery-codes`, `/auth/logout`, `/auth/session`, `/auth/password`, `/auth/reset-request`, `/auth/reset`, `/auth/invitations/accept`. Server-side sessions with stages (`password`, `enrol`, `full`), new token at sign-in, 12-hour absolute and 30-minute idle expiry, revocation on logout, reset, password change, factor reset and removal. `__Host-fc_session` cookie (Secure, HttpOnly, SameSite=Lax). Per-session `X-CSRF-Token` on every POST, PATCH and DELETE. Lockout after 5 failed passwords or codes for 15 minutes; 20 attempts an hour per address. argon2id passwords (12 to 128 characters), TOTP seed AES-256-GCM encrypted, each TOTP step and recovery code accepted once |
+| T-2.2.3 (members part) | Owner-only `GET /users`, `POST /users/invitations` (Idempotency-Key, mail through SMTP), `PATCH /users/{id}/role`, `DELETE /users/{id}`, `POST /users/{id}/factor-reset`, `POST /users/{id}/unlock`; last Owner protected; every change audited. Roles come from `membership` under RLS. The B1 session stand-in is gone from the app and `seed_dev`; it remains only in `apps/api/tests/conftest.py` (`World.user`) |
+| T-2.2.5 (storage part) | `S3Storage` through the S3 API to local MinIO (`127.0.0.1:9000`, region `us-east-1`, bucket `freightcheck-dev`), selected by `FC_STORAGE_BACKEND=s3`; keys stay `t/{tenant}/{purpose}/{source}/{uuid}` (R-13). No public object URL; downloads only through the HMAC-signed `/files/raw` link, which now also requires the file row to exist under the key's own tenant context |
+| Mail | `fc_platform.mail.SmtpMailer` to Mailpit (`127.0.0.1:1025`, no authentication); staging and production refuse to start without `FC_SMTP_STARTTLS=true`. Used for invitations, reset links and password-changed notices; never to a carrier |
+| Migration `0004` | Expand only: `app_user.password_hash` nullable and `totp_enrolled_at`; `user_session.stage` (open pre-B2 sessions revoked); tables `auth_token`, `recovery_code`, `auth_attempt`; function `fc_user_tenants` |
+
+**Left out, and why.** Inbound intake: TRD section 3 defines it as the provider's signed JSON webhook, not a mailbox or folder, so no local intake simulation was built (T-3.1.1, T-3.1.2 stay blocked on the provider). OIDC: not in the design. Operator grants, tenant settings endpoints and the role matrix over every write endpoint (IT-02): not built in B2. Deadline reminder mail: the sweep records reminders; sending them is not wired to the mailer.
+
+**Test results** (2026-11-11, clean test database at head `0004`; Mailpit and MinIO running locally):
+
+| Command | Result |
+|---|---|
+| `make test-db` | OK, head `0004` |
+| `make test-unit` | 75 passed, 0 failed (64 before B2; adds `packages/platform/tests/test_auth_primitives.py`, 11) |
+| `make test-int` | 61 passed, 0 failed (44 before B2; adds `test_b2_sign_in.py`, 14, and `test_b2_storage.py`, 3) |
+| `make lint` | Passed, 52 files |
+| `make typecheck` | Passed, 37 source files |
+| `make check-boundaries` | 0 violations |
+| `DEV_SMOKE=1 tools/dev.sh` | API ready on 8102, worker started; seed mailed the Owner invitation to Mailpit |
+| Manual live run against uvicorn on 8102 | Invitation read from the Mailpit API, accepted, TOTP enrolled, members listed, PDF uploaded to MinIO and downloaded through the signed link, logout then 401 |
+
+| Test ID | Test (file) | Result |
+|---|---|---|
+| UT-B2-01 | `test_ut_b2_01_*` (RFC 6238 appendix B vectors; step used once; one-step window) | Passed |
+| UT-B2-02 to UT-B2-06 | `test_ut_b2_02_*` to `test_ut_b2_06_*` (password policy and hash, secret bound to its user, anti-forgery value and recovery codes, key parsing, mail and storage settings) | Passed |
+| IT-15 | `test_it15_five_bad_codes_lock_*`, `test_it_b2_03_*` (code reuse), `test_it_b2_08_*` (logout then reuse of the cookie) | Passed: reused code refused; reused cookie 401; 5 bad codes lock for 15 minutes |
+| IT-22 (sign-in parts) | `test_it_b2_01_*`, `test_it_b2_04_*`, `test_it_b2_06_*`, `test_it_b2_07_*`, `test_it_b2_12_*` | Passed: no data before enrolment; reset still asks for the code; second use of a recovery code refused; factor reset audited with the Owner as actor; POST without the anti-forgery header 403. The quarantine and BCC parts Not run (no intake) |
+| IT-01 (extended) | `test_it_b2_11_*`, `test_it_b2_21_*` | Passed: sign-in to a tenant without membership refused; another tenant's member ids 404; a session pointed at another tenant 401; another tenant's file id 404; tampered or re-prefixed signed links 404 |
+| IT-B2 sign-in | `test_it_b2_01_*` to `test_it_b2_13_*` | Passed: end-to-end invitation and sign-in through Mailpit; cookie attributes and token rotation; expired and reused invitation and reset links refused; idle and absolute expiry; lockout and Owner unlock; 21st attempt in an hour 429; last-Owner guard; removal ends sessions; password change ends other sessions |
+| IT-B2 storage | `test_it_b2_20_*` to `test_it_b2_22_*` | Passed: upload and download through MinIO; key holds tenant, purpose and source; anonymous bucket read 403; link fails once the file row is gone; every test object deleted afterwards |
+
+**Risk rows.** R-13: B2 adds `test_it_b2_20_*` and `test_it_b2_21_*` (keys per tenant in a real S3 bucket; same bytes from two tenants are two objects). R-12: credential and address fields are masked in logs (`fc_platform.logging.FORBIDDEN_FIELDS`); no test scans sign-in log lines yet.
+
+**OWASP ASVS 5.0.0.** Requirement text read on 2026-11-11 from the OWASP/ASVS repository at tag `v5.0.0` (chapters V3, V5, V6, V7). IDs implemented and tested, and IDs not implemented, are listed in TRD 8.4 under "B2 status"; none is independently verified.
+
+**Document changes** (not re-reviewed): TRD.md 5.1 (four routes added: `/auth/invitations/accept`, `/auth/session`, `/auth/password`, `/users/{id}/unlock`; last-Owner rule), 8.1 (as-built sign-in, mail, intake left out), 7 (local mail and storage), 8.4 (B2 status). schema.md (migration 0004 columns and tables, `fc_user_tenants`). AGENTS.md (state line, utilities index, commands), CLAUDE.md (pointer to this section). Environment file names: this repository keeps its B1 convention, `.env.local` (git-ignored) and `tools/env.example` (names only), instead of `.env` and `.env.example`, because only `.gitignore` and `Makefile` may be added at the root.

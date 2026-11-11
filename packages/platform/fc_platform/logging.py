@@ -16,7 +16,24 @@ from typing import Any
 correlation_id: ContextVar[str | None] = ContextVar("correlation_id", default=None)
 tenant_id_var: ContextVar[str | None] = ContextVar("tenant_id", default=None)
 
-FORBIDDEN_FIELDS = frozenset({"amount", "amount_cents", "rate", "price", "body", "filename", "params"})
+FORBIDDEN_FIELDS = frozenset(
+    {
+        "amount",
+        "amount_cents",
+        "rate",
+        "price",
+        "body",
+        "filename",
+        "params",
+        # B2: credentials and personal data never reach a log line (ASVS V16.2.5).
+        "password",
+        "token",
+        "code",
+        "secret",
+        "email",
+        "to",
+    }
+)
 
 
 def new_correlation_id() -> str:

@@ -110,9 +110,12 @@ app_user = Table(
     metadata,
     _id(),
     Column("email", CITEXT, nullable=False, unique=True),
-    Column("password_hash", Text, nullable=False),
+    # Null until the invited user sets a password (B2, migration 0004).
+    Column("password_hash", Text),
     Column("totp_secret_enc", BYTEA),
     Column("totp_last_step", BigInteger),
+    # B2: set when the second factor is confirmed; a secret without it is an unfinished enrolment.
+    Column("totp_enrolled_at", TIMESTAMP(timezone=True)),
     Column("failed_count", Integer, nullable=False, server_default=text("0")),
     Column("locked_until", TIMESTAMP(timezone=True)),
     _created(),
@@ -127,13 +130,69 @@ user_session = Table(
     # B1 addition: the tenant chosen at sign-in; membership is re-checked under RLS.
     Column("active_tenant_id", UUID(as_uuid=True), nullable=False),
     Column("token_hash", BYTEA, nullable=False, unique=True),
+    # B2: `password` waits for the TOTP code, `enrol` waits for factor enrolment, `full` is signed in.
+    # Only `full` reaches tenant data; the token is replaced when a session becomes `full`.
+    Column("stage", Text, nullable=False),
     _created(),
     Column("last_seen_at", TIMESTAMP(timezone=True), nullable=False, server_default=func.now()),
     Column("expires_at", TIMESTAMP(timezone=True), nullable=False),
     Column("revoked_at", TIMESTAMP(timezone=True)),
     ForeignKeyConstraint(["user_id"], ["app_user.id"]),
     ForeignKeyConstraint(["active_tenant_id"], ["tenant.id"]),
+    _enum("stage", ("password", "enrol", "full")),
 )
+Index("ix_user_session_user_id", user_session.c.user_id)
+
+# B2 (migration 0004): single-use emailed tokens. No tenant_id and no RLS, like user_session.
+auth_token = Table(
+    "auth_token",
+    metadata,
+    _id(),
+    Column("user_id", UUID(as_uuid=True), nullable=False),
+    Column("purpose", Text, nullable=False),
+    Column("token_hash", BYTEA, nullable=False, unique=True),
+    Column("expires_at", TIMESTAMP(timezone=True), nullable=False),
+    Column("used_at", TIMESTAMP(timezone=True)),
+    Column("invited_tenant_id", UUID(as_uuid=True)),
+    Column("invited_role", Text),
+    Column("invited_by", UUID(as_uuid=True)),
+    _created(),
+    ForeignKeyConstraint(["user_id"], ["app_user.id"]),
+    ForeignKeyConstraint(["invited_tenant_id"], ["tenant.id"]),
+    ForeignKeyConstraint(["invited_by"], ["app_user.id"]),
+    _enum("purpose", ("invite", "reset")),
+    CheckConstraint(
+        "(purpose = 'invite') = (invited_tenant_id IS NOT NULL AND invited_role IS NOT NULL)", name="invite_has_tenant"
+    ),
+    CheckConstraint("invited_role IS NULL OR invited_role IN ('owner', 'approver', 'auditor', 'viewer')", name="invited_role"),
+)
+Index("ix_auth_token_user_id", auth_token.c.user_id)
+
+recovery_code = Table(
+    "recovery_code",
+    metadata,
+    _id(),
+    Column("user_id", UUID(as_uuid=True), nullable=False),
+    Column("code_hash", BYTEA, nullable=False),
+    Column("used_at", TIMESTAMP(timezone=True)),
+    _created(),
+    ForeignKeyConstraint(["user_id"], ["app_user.id"]),
+    UniqueConstraint("user_id", "code_hash"),
+)
+
+# B2: one row per sign-in attempt (password, code, reset request) for the per-address limit of
+# 20 an hour (TRD 8.1). Kept 24 hours; holds the address only, never what was typed.
+auth_attempt = Table(
+    "auth_attempt",
+    metadata,
+    _id(),
+    Column("email", CITEXT, nullable=False),
+    Column("kind", Text, nullable=False),
+    Column("succeeded", Boolean, nullable=False),
+    _created(),
+    _enum("kind", ("password", "code", "reset_request", "invitation")),
+)
+Index("ix_auth_attempt_email_created_at", auth_attempt.c.email, auth_attempt.c.created_at)
 
 membership = Table(
     "membership",

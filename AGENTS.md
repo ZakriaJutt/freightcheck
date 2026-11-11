@@ -2,7 +2,7 @@
 
 Canonical instructions for any agent working in this repository. [CLAUDE.md](CLAUDE.md) adds product guidance and defers to this file.
 
-**State of the repository:** build milestone B1 on branch `feat/b1-foundation` (owner authorised implementation on 2026-11-11, before the Phase 0 gate; recorded in [verification-report-fixing.md](verification-report-fixing.md#9-build-milestone-b1-2026-11-11)). Present: the pure core engine, the B1 subset of the schema with forced row-level security, a minimal API for the core path, and a worker. Not present: sign-in (T-2.2.3), intake and extraction, any real provider, any UI. Commands marked **exists** in section 8 were run; all others stay **proposed**; do not report a proposed command as run.
+**State of the repository:** build milestone B2 on branch `feat/b2-local-auth`, on top of B1 (`feat/b1-foundation`; owner authorised implementation on 2026-11-11, before the Phase 0 gate; recorded in [verification-report-fixing.md](verification-report-fixing.md#9-build-milestone-b1-2026-11-11), B2 in [section 10](verification-report-fixing.md#10-build-milestone-b2-2026-11-11)). Present: the pure core engine, the schema subset with forced row-level security, a minimal API for the core path, a worker, and since B2 real sign-in (password plus TOTP, invitations, reset, sessions, anti-forgery header, Owner member management), outgoing mail through SMTP to a local Mailpit, and file storage through the S3 API to a local MinIO. Not present: inbound intake and extraction, operator grants, tenant settings endpoints, any real provider account, any UI. Commands marked **exists** in section 8 were run; all others stay **proposed**; do not report a proposed command as run.
 
 ## 1. Reading order
 
@@ -59,7 +59,11 @@ Utilities index (B1):
 | Settings | `fc_platform.settings.get_settings` (unknown or missing `FC_*` keys stop startup) |
 | Logging with correlation ID | `fc_platform.logging.configure_logging`, `log`, `correlation_id` |
 | Tenant context | `fc_platform.tenant.tenant_transaction`, `set_tenant` |
-| Storage key, signed URL, fake storage and scanner | `fc_platform.storage` |
+| Storage key, signed URL, tenant of a key, S3 storage (MinIO locally), fake storage and scanner | `fc_platform.storage` (`storage_key`, `signed_url`, `verify`, `tenant_of_key`, `S3Storage`, `storage_from_settings`); in the API use `request.app.state.storage` |
+| Password hash, TOTP, recovery codes, tokens, anti-forgery value, secrets at rest | `fc_platform.auth` (`hash_password`, `verify_password`, `verify_totp`, `new_recovery_codes`, `new_token`, `token_hash`, `csrf_token`, `encrypt_secret`) |
+| Outgoing mail to users (never carriers) | `fc_platform.mail` (`SmtpMailer`, `FakeMailer`, `mailer_from_settings`); in the API use `request.app.state.mailer` |
+| Invitation token and message text | `fc_db.identity.issue_invitation`, `invitation_link`, `INVITE_BODY` |
+| Session check, anti-forgery check, sign-in steps, lockout and hourly limit | `fc_api.core` (`tenant_ctx`, `find_session`, `require_csrf`) and `fc_api.auth` (`open_session`, `revoke`, `rate_limited`, `register_failure`) |
 | Today's date in apps | `fc_platform.clock.today` (never in `fc_core`) |
 | Row by id under RLS, rows to core types | `fc_db.repo.get_row`, `load_invoice`, `load_context` |
 | Audit row, enqueue job, check run, recompute, basis check, re-evaluate claims after a confirmation (per-line before and after), claim state, fee statement, deadline sweep | `fc_db.ops` (`states_before`, `reevaluate_claims`, `line_changed`, `basis_changed`, `unresolved_lines`, `run_deadline_sweep`, ...) |
@@ -82,8 +86,9 @@ Single linear head; expand then contract; concurrent index builds; resumable bac
 - A change to a check needs a unit test with worked arithmetic in the test name or docstring.
 - A change to permissions needs IT-01 or IT-02 extended.
 - A change to a screen needs the end-to-end test that covers its route.
-- Commands. **Exists** (run in B1): `make venv`, `make env`, `make dev` (no Docker: migrates `freightcheck_dev`, seeds a synthetic tenant, starts the API on 8102 and the worker, waits for `/readyz`), `make migrate`, `make test-db` (drops and re-migrates `freightcheck_test`), `make test-unit`, `make test-int`, `make test`, `make lint`, `make typecheck`, `make check-boundaries`, `make check`. **Proposed**: `make db-repair`, `make backfill`, `make deploy`, `make restore`, `make fixtures`, and the Compose stack.
+- Commands. **Exists** (run in B1 and B2): `make venv`, `make env` (writes `.env.local` with random signing and data keys; add the local MinIO keys by hand), `make dev` (no Docker: migrates `freightcheck_dev`, seeds a synthetic tenant and mails its Owner an invitation to Mailpit at http://127.0.0.1:8025, starts the API on 8102 and the worker, waits for `/readyz`), `make migrate`, `make test-db` (drops and re-migrates `freightcheck_test`), `make test-unit`, `make test-int`, `make test`, `make lint`, `make typecheck`, `make check-boundaries`, `make check`. **Proposed**: `make db-repair`, `make backfill`, `make deploy`, `make restore`, `make fixtures`, and the Compose stack.
 - Integration tests and the app connect as the non-superuser role `freightcheck_app` (NOSUPERUSER NOBYPASSRLS); the owner role is used only for migrations and to seed or truncate test fixtures.
+- `make test-int` needs the local Mailpit (SMTP 1025, API 8025) and MinIO (9000, keys in `.env.local`) running. B2 tests use unique synthetic addresses, delete only their own messages, and delete every object they wrote. `World.user` in `conftest.py` writes a signed-in session directly; that stand-in exists only in tests.
 
 ## 9. Git hygiene
 
