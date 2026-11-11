@@ -530,6 +530,10 @@ claim = Table(
     # Migration 0002 (B1-002): override recorded when the send is recorded after contest-by.
     Column("late_send_reason", Text),
     Column("late_send_by", UUID(as_uuid=True)),
+    # Migration 0003 (B1-014): set by the daily sweep when an unsent claim passes contest-by. A mark only:
+    # approval and send stay possible with a recorded override (MH-08); never cleared.
+    Column("past_contest_by", Boolean, nullable=False, server_default=text("false")),
+    Column("past_contest_by_at", TIMESTAMP(timezone=True)),
     Column("approved_by", UUID(as_uuid=True)),
     Column("approved_at", TIMESTAMP(timezone=True)),
     Column("sent_at", Date),

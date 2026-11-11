@@ -85,7 +85,7 @@ def process_one(engine: Engine) -> uuid.UUID | None:
                 "job.done",
                 job_id=str(job_id),
                 kind=row.kind,
-                **{k: v for k, v in result.items() if k.endswith("_id") or k in ("run_no", "reminders", "expired")},
+                **{k: v for k, v in result.items() if k.endswith("_id") or k in ("run_no", "reminders", "marked_past")},
             )
         except Exception as exc:  # noqa: BLE001 - recorded on the job row, never swallowed silently
             permanent = isinstance(exc, NotFound)
