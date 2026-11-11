@@ -146,13 +146,13 @@ class TestUT15Sweep:
             SweepClaim("sent", "sent", self.today + timedelta(days=3))
         ]
 
-    def test_one_reminder_per_threshold_none_repeated_and_minus_one_expires(self) -> None:
+    def test_one_reminder_per_threshold_none_repeated_and_minus_one_marked_past_not_expired(self) -> None:
         first = deadline_sweep(self.claims(), self.today, set())
         assert {(a.claim_id, a.action, a.kind) for a in first} == {
             ("c30", "remind", "deadline_30"),
             ("c14", "remind", "deadline_14"),
             ("c3", "remind", "deadline_3"),
-            ("c-1", "expire", None),
+            ("c-1", "mark_past", None),
         }
         sent = {(a.kind, a.claim_id) for a in first if a.kind}
         second = deadline_sweep(self.claims(), self.today, sent)

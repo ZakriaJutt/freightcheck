@@ -200,8 +200,26 @@ def test_a8_receipt_after_forward_or_in_future_is_rejected_and_ignored() -> None
 # ------------------------------------------------------------------ B1-002 sweep
 
 
-@pytest.mark.parametrize(("override", "expired"), [(False, True), (True, False)])
-def test_sweep_expires_late_approved_claim_unless_late_override_recorded(override: bool, expired: bool) -> None:
-    c = SweepClaim("c1", "approved", date(2026, 9, 12), override_recorded=override)
-    acts = deadline_sweep([c], date(2026, 9, 13), set())
-    assert acts == [] if not expired else [a.action for a in acts] == ["expire"]
+@pytest.mark.parametrize("status", ["draft", "approved"])
+def test_b1_014_sweep_marks_past_contest_by_once_and_never_expires(status: str) -> None:
+    """Round 2 ruling: a draft or approved claim past contest-by is marked, not expired, so the MH-08
+    override stays reachable; an already-marked claim is not marked again."""
+    c = SweepClaim("c1", status, date(2026, 9, 12))
+    assert [(a.action, a.kind) for a in deadline_sweep([c], date(2026, 9, 13), set())] == [("mark_past", None)]
+    assert deadline_sweep([replace(c, already_marked=True)], date(2026, 9, 14), set()) == []
+
+
+def test_b1_015_pending_revision_with_earlier_start_blocks_instead_of_tariff() -> None:
+    """Reviewer case R9: contract rev 1 from 1 Jan 2026, rev 2 entered from 1 Dec 2025, tariff 20.00/cwt
+    confirmed. Pickup 15 Dec 2025: old result was a tariff variance of 60.00 (claimable)."""
+    rev1 = contract_v(1, effective_from=date(2026, 1, 1), effective_to=None, doc_id="rs1")
+    rev2 = contract_v(2, status="entered", effective_from=date(2025, 12, 1), effective_to=None, doc_id="rs2", revises_id="rs1")
+    tariff = replace(
+        contract_v(1, effective_from=date(2025, 1, 1), effective_to=None, rate="20.00", doc_id="tar"), doc_type="tariff"
+    )
+    inv = replace(ut01_invoice(pickup=date(2025, 12, 15), with_fuel=False), invoice_date=date(2025, 12, 16))
+    c2 = one(run_checks(inv, RunContext(documents=(rev1, rev2, tariff))), "C-02")
+    assert (c2.status, c2.exception_code, c2.claimable) == ("exception", "GOVERNING_RATE_MISSING", False)
+    # Inside the prior's dates the confirmed prior still governs while the revision is pending.
+    c2_mar = one(run_checks(ut01_invoice(with_fuel=False), RunContext(documents=(rev1, rev2, tariff))), "C-02")
+    assert (c2_mar.status, c2_mar.variance_cents) == ("variance", 2772)

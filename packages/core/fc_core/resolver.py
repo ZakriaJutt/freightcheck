@@ -93,6 +93,12 @@ def resolve(
             return matches[0]
         if date_missing:
             return Unresolved("GOVERNING_DATE_MISSING", f"invoice lacks the date the {doc_type} basis needs", True)
+        # B1-015: an entered revision covering a date its confirmed prior does not is not merely
+        # pending there: it may govern, so it blocks (never fall through to another tier or type).
+        uncovered = [d for d in tier if d.status == "entered" and _pending_revision(d, typed) and may_govern(d, invoice)]
+        if uncovered:
+            ids = ", ".join(sorted(d.id for d in uncovered))
+            return Unresolved("GOVERNING_RATE_MISSING", f"unconfirmed revision {ids} may govern this date", True)
     return Unresolved("GOVERNING_RATE_MISSING", f"no confirmed {doc_type} in effect")
 
 

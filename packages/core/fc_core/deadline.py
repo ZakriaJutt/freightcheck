@@ -119,20 +119,20 @@ class SweepClaim:
     claim_id: str
     status: str
     contest_by: date | None
-    # An Approver recorded a late override at approval; the claim is not expired by the sweep
-    # (the send step still requires its own recorded override, B1-002).
-    override_recorded: bool = False
+    already_marked: bool = False  # past_contest_by already set
 
 
 @dataclass(frozen=True)
 class SweepAction:
     claim_id: str
-    action: Literal["remind", "expire"]
+    action: Literal["remind", "mark_past"]
     kind: str | None = None  # deadline_30, deadline_14, deadline_3
 
 
 def deadline_sweep(claims: list[SweepClaim], today: date, already_sent: set[tuple[str, str]]) -> list[SweepAction]:
-    """Reminders at 30, 14 and 3 days once each; unsent confirmed claims past contest-by expire.
+    """Reminders at 30, 14 and 3 days once each; unsent claims past contest-by are marked
+    `past_contest_by` (B1-014). The sweep never expires a claim: approval and send stay possible
+    with a recorded override (MH-08), and sending without one is refused.
 
     `already_sent` holds (kind, claim_id) pairs from the notification table.
     """
@@ -142,8 +142,8 @@ def deadline_sweep(claims: list[SweepClaim], today: date, already_sent: set[tupl
             continue
         left = days_left(c.contest_by, today)
         if left < 0:
-            if not (c.override_recorded and c.status == "approved"):
-                actions.append(SweepAction(c.claim_id, "expire"))
+            if not c.already_marked:
+                actions.append(SweepAction(c.claim_id, "mark_past"))
             continue
         for threshold in REMINDER_DAYS:
             kind = f"deadline_{threshold}"
