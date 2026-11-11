@@ -21,7 +21,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
-from sqlalchemy import Connection, Engine, func, select, text
+from sqlalchemy import Connection, Engine, func, or_, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from fc_api.core import (
@@ -30,6 +30,7 @@ from fc_api.core import (
     SESSION_IDLE,
     ApiError,
     Ctx,
+    error_body,
     find_session,
     get_engine,
     require_csrf,
@@ -57,7 +58,7 @@ from fc_platform.auth import (
 )
 from fc_platform.clock import now
 from fc_platform.logging import log
-from fc_platform.mail import Mailer
+from fc_platform.mail import OUTBOX, Mailer
 from fc_platform.settings import get_settings
 from fc_platform.tenant import set_tenant
 
@@ -81,6 +82,17 @@ def mailer(request: Request) -> Mailer:
     return m
 
 
+def notify(request: Request, to: str, subject: str, body: str, kind: str) -> None:
+    """Queue a notice to a user; the response never waits for or depends on SMTP (B2-S03)."""
+    OUTBOX.put(mailer(request), to, subject, body, kind=kind)
+
+
+def refusal(err: ApiError) -> JSONResponse:
+    """Answer an error without raising, so the request transaction commits the failure count
+    (inside `tenant_ctx` a raised error rolls back; B2-S01)."""
+    return JSONResponse(error_body(err.code, err.message, err.field, **err.extra), status_code=err.status)
+
+
 def send_mail(m: Mailer, to: str, subject: str, body: str, kind: str) -> None:
     try:
         m.send(to, subject, body, kind=kind)
@@ -92,21 +104,47 @@ def send_mail(m: Mailer, to: str, subject: str, body: str, kind: str) -> None:
 # ------------------------------------------------------------------ attempt limit and lockout
 
 
-def rate_limited(conn: Connection, email: str) -> bool:
-    """20 attempts an hour per address (TRD 8.1, ASVS V6.3.1), whether or not the address exists."""
+def rate_limited(conn: Connection, email: str, user_id: uuid.UUID | None = None) -> bool:
+    """20 attempts an hour per address and per account (TRD 8.1, ASVS V6.3.1; B2-S07), whether
+    or not the address exists. Every route that takes a password or code counts here."""
     conn.execute(
         auth_attempt.delete().where(auth_attempt.c.email == email, auth_attempt.c.created_at < func.now() - ATTEMPT_RETENTION)
     )
+    who = auth_attempt.c.email == email
+    if user_id is not None:
+        who = or_(who, auth_attempt.c.user_id == user_id)
     n = conn.execute(
-        select(func.count())
-        .select_from(auth_attempt)
-        .where(auth_attempt.c.email == email, auth_attempt.c.created_at > func.now() - timedelta(hours=1))
+        select(func.count()).select_from(auth_attempt).where(who, auth_attempt.c.created_at > func.now() - timedelta(hours=1))
     ).scalar_one()
     return int(n) >= HOURLY_LIMIT
 
 
-def record_attempt(conn: Connection, email: str, kind: str, ok: bool) -> None:
-    conn.execute(auth_attempt.insert().values(email=email, kind=kind, succeeded=ok))
+def record_attempt(conn: Connection, email: str, kind: str, ok: bool, user_id: uuid.UUID | None = None) -> None:
+    conn.execute(auth_attempt.insert().values(email=email, user_id=user_id, kind=kind, succeeded=ok))
+
+
+RATE_LIMITED = ("RATE_LIMITED", "too many attempts for this address; wait an hour")
+
+
+def reauthenticate(conn: Connection, user: Any, *, password: str | None, code: str | None, kind: str) -> ApiError | None:
+    """Re-authentication on a signed-in session (B2-S01): the same hourly limit, failure count
+    and lockout as sign-in. Returns the error to answer, or None when every given factor passed."""
+    if rate_limited(conn, user.email, user.id):
+        return ApiError(429, *RATE_LIMITED)
+    locked = is_locked(user)
+    ok = not locked
+    if ok and password is not None:
+        ok = verify_password(user.password_hash, password)
+    if ok:
+        ok = bool(code) and check_second_factor(conn, user, code, None)
+    record_attempt(conn, user.email, kind, ok, user.id)
+    if not ok:
+        if not locked:
+            register_failure(conn, user.id)
+        log(logger, "auth.reauth_refused", user_id=str(user.id), locked=locked)
+        return refused()
+    conn.execute(app_user.update().where(app_user.c.id == user.id).values(failed_count=0))
+    return None
 
 
 def is_locked(user: Any) -> bool:
@@ -259,13 +297,13 @@ def login(body: LoginBody, engine: Engine = Depends(get_engine)) -> JSONResponse
     email = body.email.strip()
     outcome: Opened | ApiError
     with engine.begin() as conn:
-        if rate_limited(conn, email):
-            outcome = ApiError(429, "RATE_LIMITED", "too many attempts for this address; wait an hour")
+        user = conn.execute(select(app_user).where(app_user.c.email == email).with_for_update()).first()
+        if rate_limited(conn, email, user.id if user is not None else None):
+            outcome = ApiError(429, *RATE_LIMITED)
         else:
-            user = conn.execute(select(app_user).where(app_user.c.email == email).with_for_update()).first()
             ok = verify_password(user.password_hash if user is not None else None, body.password)
             locked = user is not None and is_locked(user)
-            record_attempt(conn, email, "password", ok and not locked)
+            record_attempt(conn, email, "password", ok and not locked, user.id if user is not None else None)
             if user is None or locked or not ok:
                 if user is not None and not locked:
                     register_failure(conn, user.id)
@@ -300,12 +338,12 @@ def totp(body: CodeBody, request: Request, engine: Engine = Depends(get_engine))
     with engine.begin() as conn:
         _, sess = pending_session(request, conn, ("password",))
         user = load_user(conn, sess.user_id)
-        if rate_limited(conn, user.email):
-            outcome = ApiError(429, "RATE_LIMITED", "too many attempts for this address; wait an hour")
+        if rate_limited(conn, user.email, user.id):
+            outcome = ApiError(429, *RATE_LIMITED)
         else:
             locked = is_locked(user)
             ok = not locked and check_second_factor(conn, user, body.code, body.recovery_code)
-            record_attempt(conn, user.email, "code", ok)
+            record_attempt(conn, user.email, "code", ok, user.id)
             if not ok:
                 if not locked:
                     register_failure(conn, user.id)
@@ -348,12 +386,12 @@ def totp_confirm(body: ConfirmBody, request: Request, engine: Engine = Depends(g
         user = load_user(conn, sess.user_id)
         if user.totp_secret_enc is None:
             raise ApiError(409, "ENROL_FIRST", "request a secret from /auth/totp/enrol first")
-        if rate_limited(conn, user.email):
-            outcome = ApiError(429, "RATE_LIMITED", "too many attempts for this address; wait an hour")
+        if rate_limited(conn, user.email, user.id):
+            outcome = ApiError(429, *RATE_LIMITED)
         else:
             locked = is_locked(user)
             ok = not locked and check_second_factor(conn, user, body.code, None)
-            record_attempt(conn, user.email, "code", ok)
+            record_attempt(conn, user.email, "code", ok, user.id)
             if not ok:
                 if not locked:
                     register_failure(conn, user.id)
@@ -368,12 +406,15 @@ def totp_confirm(body: ConfirmBody, request: Request, engine: Engine = Depends(g
 
 
 @router.post("/recovery-codes")
-def regenerate_recovery_codes(body: ConfirmBody, ctx: Ctx = Depends(tenant_ctx)) -> JSONResponse:
-    """Ten new codes replace the old ones; needs a current TOTP code (re-authentication)."""
+def regenerate_recovery_codes(body: ConfirmBody, request: Request, ctx: Ctx = Depends(tenant_ctx)) -> JSONResponse:
+    """Ten new codes replace the old ones. Needs a fresh TOTP code, counted against the same
+    limit and lockout as sign-in, and mails the user a notice (B2-S01)."""
     user = load_user(ctx.conn, ctx.user_id)
-    if not check_second_factor(ctx.conn, user, body.code, None):
-        raise refused()
+    err = reauthenticate(ctx.conn, user, password=None, code=body.code, kind="code")
+    if err is not None:
+        return refusal(err)
     codes = store_recovery_codes(ctx.conn, ctx.user_id)
+    notify(request, user.email, "New FreightCheck recovery codes were issued", CODES_BODY, "recovery_codes")
     ops.audit(
         ctx.conn,
         tenant_id=ctx.tenant_id,
@@ -423,20 +464,27 @@ def logout(request: Request, engine: Engine = Depends(get_engine)) -> Response:
 class PasswordChangeBody(BaseModel):
     current_password: str = Field(min_length=1, max_length=1024)
     new_password: str = Field(min_length=1, max_length=1024)
+    # A fresh TOTP code (B2-S01 ruling). Optional in the schema so that a request without it is
+    # still counted as a failed attempt instead of stopping at validation.
+    code: str | None = Field(default=None, max_length=12)
 
 
 @router.post("/password", status_code=204)
 def change_password(body: PasswordChangeBody, request: Request, ctx: Ctx = Depends(tenant_ctx)) -> Response:
-    """Needs the current password; ends every other session of the user (ASVS V6.2.2, V6.2.3, V7.4.3)."""
-    user = load_user(ctx.conn, ctx.user_id)
-    if not verify_password(user.password_hash, body.current_password):
-        raise refused()
+    """Needs the current password and a fresh TOTP code, both counted against the sign-in limit
+    and lockout (B2-S01); ends every other session and every open reset link (B2-S05) and mails
+    a notice (ASVS V6.2.2, V6.2.3, V6.3.7, V7.4.3)."""
     try:
         new_hash = hash_password(body.new_password)
     except PasswordPolicyError as exc:
         raise ApiError(422, "PASSWORD_POLICY", str(exc), field="new_password") from exc
+    user = load_user(ctx.conn, ctx.user_id)
+    err = reauthenticate(ctx.conn, user, password=body.current_password, code=body.code, kind="password")
+    if err is not None:
+        return refusal(err)
     ctx.conn.execute(app_user.update().where(app_user.c.id == ctx.user_id).values(password_hash=new_hash))
     revoke(ctx.conn, user_session.c.user_id == ctx.user_id, user_session.c.id != ctx.session_id)
+    retire_reset_links(ctx.conn, ctx.user_id)
     ops.audit(
         ctx.conn,
         tenant_id=ctx.tenant_id,
@@ -446,8 +494,16 @@ def change_password(body: PasswordChangeBody, request: Request, ctx: Ctx = Depen
         entity_type="app_user",
         entity_id=ctx.user_id,
     )
-    send_mail(mailer(request), user.email, "Your FreightCheck password was changed", CHANGED_BODY, "password_changed")
+    notify(request, user.email, "Your FreightCheck password was changed", CHANGED_BODY, "password_changed")
     return Response(status_code=204)
+
+
+def retire_reset_links(conn: Connection, user_id: uuid.UUID) -> None:
+    conn.execute(
+        auth_token.update()
+        .where(auth_token.c.user_id == user_id, auth_token.c.purpose == "reset", auth_token.c.used_at.is_(None))
+        .values(used_at=func.now())
+    )
 
 
 # ------------------------------------------------------------------ password reset (emailed single-use link)
@@ -460,6 +516,9 @@ Open this link within 30 minutes to choose a new password:
 After the reset you still sign in with your authenticator code. If you did not ask for this,
 ignore this message; your password is unchanged.
 """
+CODES_BODY = """Ten new recovery codes were just issued for your FreightCheck account; the earlier
+codes no longer work. If this was not you, contact your account Owner.
+"""
 CHANGED_BODY = """The password for your FreightCheck account was just changed and your other sessions
 were signed out. If this was not you, contact your account Owner.
 """
@@ -471,21 +530,17 @@ class ResetRequestBody(BaseModel):
 
 @router.post("/reset-request", status_code=202)
 def reset_request(body: ResetRequestBody, request: Request, engine: Engine = Depends(get_engine)) -> dict[str, str]:
-    """Always 202 so the answer does not reveal whether the address has an account."""
+    """Always 202 with the same body, and the mail is queued, so neither the answer, its timing
+    nor a mail outage reveals whether the address has an account (ASVS V6.3.8; B2-S03). The
+    hourly limit counts the address whether or not it exists."""
     email = body.email.strip()
-    link: str | None = None
-    to = ""
     with engine.begin() as conn:
         if rate_limited(conn, email):
-            raise ApiError(429, "RATE_LIMITED", "too many attempts for this address; wait an hour")
+            raise ApiError(429, *RATE_LIMITED)
         record_attempt(conn, email, "reset_request", True)
         user = conn.execute(select(app_user).where(app_user.c.email == email)).first()
         if user is not None and user.password_hash is not None:
-            conn.execute(
-                auth_token.update()
-                .where(auth_token.c.user_id == user.id, auth_token.c.purpose == "reset", auth_token.c.used_at.is_(None))
-                .values(used_at=func.now())
-            )
+            retire_reset_links(conn, user.id)
             token = new_token()
             conn.execute(
                 auth_token.insert().values(
@@ -494,8 +549,7 @@ def reset_request(body: ResetRequestBody, request: Request, engine: Engine = Dep
             )
             # The token travels in the fragment, which browsers do not send to servers (ASVS V14.2.1).
             link = f"{get_settings().public_base_url.rstrip('/')}/reset-password#token={token}"
-            to = user.email
-            send_mail(mailer(request), to, "Reset your FreightCheck password", RESET_BODY.format(link=link), "password_reset")
+            notify(request, user.email, "Reset your FreightCheck password", RESET_BODY.format(link=link), "password_reset")
             log(logger, "auth.reset_requested", user_id=str(user.id))
     return {"status": "accepted"}
 
@@ -540,7 +594,8 @@ def reset(body: ResetBody, request: Request, engine: Engine = Depends(get_engine
         user = load_user(conn, tok.user_id)
         conn.execute(app_user.update().where(app_user.c.id == user.id).values(password_hash=hash_password(body.password)))
         revoke(conn, user_session.c.user_id == user.id)
-        send_mail(mailer(request), user.email, "Your FreightCheck password was changed", CHANGED_BODY, "password_changed")
+        retire_reset_links(conn, user.id)
+        notify(request, user.email, "Your FreightCheck password was changed", CHANGED_BODY, "password_changed")
         log(logger, "auth.password_reset", user_id=str(user.id))
     return Response(status_code=204)
 
@@ -561,8 +616,8 @@ def accept_invitation(body: AcceptBody, engine: Engine = Depends(get_engine)) ->
     with engine.begin() as conn:
         tok = take_token(conn, body.token, "invite")
         user = load_user(conn, tok.user_id)
-        if rate_limited(conn, user.email):
-            raise ApiError(429, "RATE_LIMITED", "too many attempts for this address; wait an hour")
+        if rate_limited(conn, user.email, user.id):
+            raise ApiError(429, *RATE_LIMITED)
         if user.password_hash is None:
             try:
                 new_hash = hash_password(body.password)
@@ -572,7 +627,7 @@ def accept_invitation(body: AcceptBody, engine: Engine = Depends(get_engine)) ->
             ok = True
         else:
             ok = not is_locked(user) and verify_password(user.password_hash, body.password)
-        record_attempt(conn, user.email, "invitation", ok)
+        record_attempt(conn, user.email, "invitation", ok, user.id)
         if not ok:
             register_failure(conn, user.id)
             outcome = refused()

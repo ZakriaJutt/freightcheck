@@ -61,9 +61,9 @@ Utilities index (B1):
 | Tenant context | `fc_platform.tenant.tenant_transaction`, `set_tenant` |
 | Storage key, signed URL, tenant of a key, S3 storage (MinIO locally), fake storage and scanner | `fc_platform.storage` (`storage_key`, `signed_url`, `verify`, `tenant_of_key`, `S3Storage`, `storage_from_settings`); in the API use `request.app.state.storage` |
 | Password hash, TOTP, recovery codes, tokens, anti-forgery value, secrets at rest | `fc_platform.auth` (`hash_password`, `verify_password`, `verify_totp`, `new_recovery_codes`, `new_token`, `token_hash`, `csrf_token`, `encrypt_secret`) |
-| Outgoing mail to users (never carriers) | `fc_platform.mail` (`SmtpMailer`, `FakeMailer`, `mailer_from_settings`); in the API use `request.app.state.mailer` |
+| Outgoing mail to users (never carriers) | `fc_platform.mail` (`SmtpMailer`, `FakeMailer`, `mailer_from_settings`, `OUTBOX` for notices that must not delay or fail a response); in the API use `request.app.state.mailer` or `fc_api.auth.notify` |
 | Invitation token and message text | `fc_db.identity.issue_invitation`, `invitation_link`, `INVITE_BODY` |
-| Session check, anti-forgery check, sign-in steps, lockout and hourly limit | `fc_api.core` (`tenant_ctx`, `find_session`, `require_csrf`) and `fc_api.auth` (`open_session`, `revoke`, `rate_limited`, `register_failure`) |
+| Session check, anti-forgery check, sign-in steps, lockout and hourly limit | `fc_api.core` (`tenant_ctx`, `find_session`, `require_csrf`) and `fc_api.auth` (`open_session`, `revoke`, `rate_limited`, `register_failure`, `reauthenticate` for any route that takes a password or code) |
 | Today's date in apps | `fc_platform.clock.today` (never in `fc_core`) |
 | Row by id under RLS, rows to core types | `fc_db.repo.get_row`, `load_invoice`, `load_context` |
 | Audit row, enqueue job, check run, recompute, basis check, re-evaluate claims after a confirmation (per-line before and after), claim state, fee statement, deadline sweep | `fc_db.ops` (`states_before`, `reevaluate_claims`, `line_changed`, `basis_changed`, `unresolved_lines`, `run_deadline_sweep`, ...) |

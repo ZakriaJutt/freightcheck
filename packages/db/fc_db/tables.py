@@ -187,12 +187,15 @@ auth_attempt = Table(
     metadata,
     _id(),
     Column("email", CITEXT, nullable=False),
+    # Migration 0005 (B2-S07): the account, when known, so the limit follows the account too.
+    Column("user_id", UUID(as_uuid=True)),
     Column("kind", Text, nullable=False),
     Column("succeeded", Boolean, nullable=False),
     _created(),
     _enum("kind", ("password", "code", "reset_request", "invitation")),
 )
 Index("ix_auth_attempt_email_created_at", auth_attempt.c.email, auth_attempt.c.created_at)
+Index("ix_auth_attempt_user_id_created_at", auth_attempt.c.user_id, auth_attempt.c.created_at)
 
 membership = Table(
     "membership",

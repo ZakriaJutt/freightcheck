@@ -8,7 +8,9 @@ Logs carry the message kind and a message id, never the address or the body (R-1
 from __future__ import annotations
 
 import logging
+import queue
 import smtplib
+import threading
 from dataclasses import dataclass, field
 from email.message import EmailMessage
 from email.utils import make_msgid
@@ -60,3 +62,39 @@ class FakeMailer:
 
 def mailer_from_settings(settings: Settings) -> Mailer:
     return SmtpMailer(settings)
+
+
+class Outbox:
+    """Sends mail on a background thread so the caller's response neither waits for SMTP nor
+    depends on it (B2-S03: a reset request answers the same, in the same time, whether or not
+    the address exists and whether or not mail is up). A failed send is logged by kind only.
+    Messages are held in memory: a crash loses unsent ones and the user asks again."""
+
+    def __init__(self) -> None:
+        self._q: queue.Queue[tuple[Mailer, str, str, str, str]] = queue.Queue()
+        self._lock = threading.Lock()
+        self._thread: threading.Thread | None = None
+
+    def put(self, mailer: Mailer, to: str, subject: str, body: str, *, kind: str) -> None:
+        with self._lock:
+            if self._thread is None or not self._thread.is_alive():
+                self._thread = threading.Thread(target=self._run, name="fc-outbox", daemon=True)
+                self._thread.start()
+        self._q.put((mailer, to, subject, body, kind))
+
+    def _run(self) -> None:
+        while True:
+            mailer, to, subject, body, kind = self._q.get()
+            try:
+                mailer.send(to, subject, body, kind=kind)
+            except Exception as exc:  # noqa: BLE001 - one bad message must not stop the outbox
+                logger.error("mail.failed", extra={"fields": {"kind": kind, "error": type(exc).__name__}})
+            finally:
+                self._q.task_done()
+
+    def join(self) -> None:
+        """Wait until every queued message was attempted (tests and shutdown)."""
+        self._q.join()
+
+
+OUTBOX = Outbox()

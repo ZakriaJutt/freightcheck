@@ -12,7 +12,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 
 from fc_api.auth import mailer, revoke, send_mail
 from fc_api.core import ApiError, Ctx, idempotent, not_found, tenant_ctx
@@ -33,6 +33,14 @@ def member(ctx: Ctx, user_id: uuid.UUID, *, for_update: bool = False) -> Any:
     if row is None:
         raise not_found("user", user_id)
     return row
+
+
+def only_this_tenant(ctx: Ctx, user_id: uuid.UUID) -> None:
+    """Refuse when the user also belongs to another live tenant. Uses `fc_user_tenants`, which
+    returns only tenant ids; nothing about the other tenant is answered (B2-S02)."""
+    tenants = ctx.conn.execute(text("select tenant_id from fc_user_tenants(:u)"), {"u": user_id}).scalars().all()
+    if any(t != ctx.tenant_id for t in tenants):
+        raise ApiError(409, "OTHER_TENANTS", "this user also signs in to another account; FreightCheck support must do this")
 
 
 def guard_last_owner(ctx: Ctx, m: Any) -> None:
@@ -101,7 +109,9 @@ def invite(body: InviteBody, request: Request, ctx: Ctx = Depends(tenant_ctx)) -
         )
         return 201, {
             "invitation_id": str(inv.token_id),
-            "user_id": str(inv.user_id),
+            # Null until accepted: an existing account's global id is never disclosed to
+            # another tenant's Owner (B2-S04).
+            "user_id": None,
             "role": body.role,
             "expires_at": inv.expires_at.isoformat(),
         }
@@ -168,9 +178,12 @@ def remove_user(user_id: uuid.UUID, ctx: Ctx = Depends(tenant_ctx)) -> Response:
 def factor_reset(user_id: uuid.UUID, ctx: Ctx = Depends(tenant_ctx)) -> Response:
     """After the Owner confirms identity by a call (TRD 8.1): the second factor and recovery
     codes are removed and every session ends; the next sign-in needs the password and a new
-    enrolment. The factor is the user's, so this applies in every tenant they belong to."""
+    enrolment. The factor and the lockout are the user's across tenants, so an Owner may act only
+    on a user who belongs to no other tenant (B2-S02); otherwise 409 `OTHER_TENANTS` and the
+    reset needs FreightCheck's operator path (deferred). Removal from this tenant stays allowed."""
     ctx.require(OWNER)
     member(ctx, user_id)
+    only_this_tenant(ctx, user_id)
     ctx.conn.execute(
         app_user.update().where(app_user.c.id == user_id).values(totp_secret_enc=None, totp_enrolled_at=None, totp_last_step=None)
     )
@@ -190,9 +203,10 @@ def factor_reset(user_id: uuid.UUID, ctx: Ctx = Depends(tenant_ctx)) -> Response
 
 @api.post("/{user_id}/unlock", status_code=204)
 def unlock(user_id: uuid.UUID, ctx: Ctx = Depends(tenant_ctx)) -> Response:
-    """An Owner can lift the 15-minute lockout (TRD 8.1)."""
+    """An Owner can lift the 15-minute lockout (TRD 8.1), only for a user of no other tenant (B2-S02)."""
     ctx.require(OWNER)
     member(ctx, user_id)
+    only_this_tenant(ctx, user_id)
     ctx.conn.execute(app_user.update().where(app_user.c.id == user_id).values(locked_until=None, failed_count=0))
     ops.audit(
         ctx.conn,

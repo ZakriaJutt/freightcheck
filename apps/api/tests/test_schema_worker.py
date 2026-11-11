@@ -134,4 +134,4 @@ def test_readyz_reports_schema_head(world: World) -> None:
     from fastapi.testclient import TestClient
 
     r = TestClient(world.app).get("/readyz")
-    assert r.status_code == 200 and r.json()["schema"] == "0004"
+    assert r.status_code == 200 and r.json()["schema"] == "0005"

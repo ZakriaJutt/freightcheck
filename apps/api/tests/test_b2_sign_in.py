@@ -346,7 +346,10 @@ def test_it_b2_13_password_change_needs_current_and_ends_other_sessions(world: W
     owner.last_step = second.last_step
     r = owner.post("/api/v1/auth/password", {"current_password": "wrong-password-123", "new_password": "x" * 20})
     assert r.status_code == 401
-    r = owner.post("/api/v1/auth/password", {"current_password": PASSWORD, "new_password": "new-synthetic-phrase-1"})
+    r = owner.post(
+        "/api/v1/auth/password",
+        {"current_password": PASSWORD, "new_password": "new-synthetic-phrase-1", "code": owner.next_code()},
+    )
     assert r.status_code == 204
     assert owner.c.get("/api/v1/users").status_code == 200  # this session stays
     assert second.c.get("/api/v1/users").status_code == 401  # the other one ended (V7.4.3)

@@ -417,3 +417,27 @@ Owner request of 2026-11-11: build what needs no external account. Branch `feat/
 **OWASP ASVS 5.0.0.** Requirement text read on 2026-11-11 from the OWASP/ASVS repository at tag `v5.0.0` (chapters V3, V5, V6, V7). IDs implemented and tested, and IDs not implemented, are listed in TRD 8.4 under "B2 status"; none is independently verified.
 
 **Document changes** (not re-reviewed): TRD.md 5.1 (four routes added: `/auth/invitations/accept`, `/auth/session`, `/auth/password`, `/users/{id}/unlock`; last-Owner rule), 8.1 (as-built sign-in, mail, intake left out), 7 (local mail and storage), 8.4 (B2 status). schema.md (migration 0004 columns and tables, `fc_user_tenants`). AGENTS.md (state line, utilities index, commands), CLAUDE.md (pointer to this section). Environment file names: this repository keeps its B1 convention, `.env.local` (git-ignored) and `tools/env.example` (names only), instead of `.env` and `.env.example`, because only `.gitignore` and `Makefile` may be added at the root.
+
+### 10.1 Security fixes after B2 review, awaiting recheck (2026-11-11)
+
+Review `_coordination/review/freightcheck-b2-sec-round1.md` at `63a9091`: 0 blocker, 3 major, 4 minor. Fixed according to the coordinator's rulings of 2026-11-11. Not reviewed again.
+
+| Finding | Fix | Regression tests (`apps/api/tests/test_b2_security_round1.py`) |
+|---|---|---|
+| B2-S01 major | `/auth/recovery-codes` and `/auth/password` re-authenticate through `fc_api.auth.reauthenticate`: the hourly limit, failure count and 5-failure lockout are the same as at sign-in, and the failure is committed (the route answers without raising inside `tenant_ctx`). Regenerating recovery codes mails a notice. A password change now also needs a fresh TOTP `code` | `test_b2_s01_*` (5): reviewer a08 and a09, fresh code required, notice mailed, hourly limit |
+| B2-S02 major | Factor reset and unlock answer 409 `OTHER_TENANTS` when the user belongs to any other live tenant; the operator path is deferred. Removal from the caller's tenant is unchanged | `test_b2_s02_*`: reviewer a18 |
+| B2-S03 major | Reset-request mail is queued on `fc_platform.mail.OUTBOX` (background thread); the answer is always 202 `{"status": "accepted"}` and never 503. Password-changed notices use the outbox too. TRD 8.4 now states what the V6.3.8 tests cover | `test_b2_s03_*` (2): reviewer a21 and a22 |
+| B2-S04 minor | The invitation response gives `user_id: null` for every address | `test_b2_s04_*`: reviewer a17 |
+| B2-S05 minor | A password change, a reset and a new reset request all retire open reset links | `test_b2_s05_*`: reviewer a25 |
+| B2-S06 minor | A repository test now checks log masking | `test_b2_s06_*` |
+| B2-S07 minor | `auth_attempt.user_id` (migration `0005`, expand only): the limit counts by address or by account. There is still no per-source throttle; the residual risk is recorded in TRD 8.4 | `test_b2_s07_*` |
+
+Results: `make test-db` OK (head `0005`); `make test-unit` 75 passed, 0 failed; `make test-int` 73 passed, 0 failed (61 before; 12 regression tests added); `make lint` passed (53 files); `make typecheck` passed (38 source files); `make check-boundaries` 0 violations.
+
+Reviewer script `freightcheck-b2-sec_attack.py`: 20 passed and 7 failed before the fixes; 25 passed and 2 failed after, run twice. Both remaining failures come from the rulings, which change the contract the script assumed:
+- a18 expects 204 from the cross-tenant factor reset. The ruling makes it refused with 409; the rest of the case (tenant-A session kept, sign-in stays at the code step) is asserted in `test_b2_s02_*`.
+- a25 changes the password without a TOTP code. The ruling requires one, so the request gets 401; with a code, the reset link is refused (`test_b2_s05_*`).
+
+That script's Mailpit cleanup ran before the queued reset mails arrived, which left 5 messages to `@b2.freightcheck.example`; they were deleted by ID afterwards.
+
+Documents changed: TRD.md 5.1 (`/auth/password`, `/auth/recovery-codes`, Owner routes), 8.1 (limits, outbox), 8.4 (V6.3.1 and V6.3.8 evidence, B2-S07 residual risk); schema.md (`auth_attempt.user_id`).

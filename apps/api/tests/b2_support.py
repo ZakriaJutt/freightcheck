@@ -17,7 +17,7 @@ from fastapi.testclient import TestClient
 from fc_api.core import CSRF_HEADER
 from fc_db.identity import INVITE_BODY, INVITE_SUBJECT, invitation_link, issue_invitation
 from fc_platform.auth import totp_code, totp_step
-from fc_platform.mail import SmtpMailer
+from fc_platform.mail import OUTBOX, SmtpMailer
 from fc_platform.settings import get_settings
 
 MAILPIT = "http://127.0.0.1:8025/api/v1"
@@ -34,8 +34,10 @@ class Mailpit:
     def __init__(self) -> None:
         self.http = httpx.Client(base_url=MAILPIT, timeout=10)
         self.seen: list[str] = []
+        self.asked: set[str] = set()
 
     def messages_to(self, to: str) -> list[dict[str, Any]]:
+        self.asked.add(to)
         r = self.http.get("/search", params={"query": f'to:"{to}"'})
         r.raise_for_status()
         msgs: list[dict[str, Any]] = r.json().get("messages") or []
@@ -56,7 +58,11 @@ class Mailpit:
         raise AssertionError(f"no mail '{subject_part}' to {to}")
 
     def cleanup(self) -> None:
-        """Delete only the messages these tests produced; Mailpit is shared with other repos."""
+        """Delete only the messages these tests produced; Mailpit is shared with other repos.
+        Queued notices are sent first, and every address asked about is searched again."""
+        OUTBOX.join()
+        for to in sorted(self.asked):
+            self.messages_to(to)
         if self.seen:
             self.http.request("DELETE", "/messages", json={"IDs": sorted(set(self.seen))})
         self.http.close()
