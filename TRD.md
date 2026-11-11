@@ -97,7 +97,7 @@ Base `/api/v1`, JSON, session cookie, `Idempotency-Key` required on every POST t
 | GET, POST `/claims`; GET `/claims/{id}` | Ledger; create draft | Auditor+ |
 | POST `/claims/{id}/approve` | Recompute, then freeze claimed amount; 409 `STALE_BASIS` or `PAST_CONTEST_BY` (the second accepts `override_reason`; a non-broker invoice with no contest-by date is treated as past it) | Approver |
 | POST `/claims/{id}/redraft` | Re-run checks and rebuild an unsent claim's lines on the current basis; clears `stale_basis`; the claim must be approved again. Added 2026-11-11 (B1): without it a stale draft had no way forward | Auditor+ |
-| POST `/claims/{id}/sent` | Record send. Recomputes the basis (409 `STALE_BASIS`); after contest-by needs `override_reason` unless the approval had one (409 `PAST_CONTEST_BY`); `sent_on` between the approval date and today (review round 1, 2026-11-11) | Approver |
+| POST `/claims/{id}/sent` | Record send. Recomputes the basis (409 `STALE_BASIS`); after contest-by needs `override_reason` unless the approval had one (409 `PAST_CONTEST_BY`); `sent_on` between the approval date and today (review round 1, 2026-11-11); 409 `BASIS_UNRESOLVED` when a claimed line's governing document can no longer be determined (for example a lane document now exists and the invoice lane is unknown) (review round 2, 2026-11-11) | Approver |
 | POST `/claims/{id}/events` | Acknowledgment, decision, withdrawal, rebill | Approver |
 | POST `/claims/{id}/settlements`; POST `/settlements/{id}/reverse` | Settlement with a carrier-response or settlement-evidence document; above accepted (or claimed) needs `excess_reason` (review round 1, 2026-11-11) | Approver |
 | GET, POST `/time-entries` | Time log | Auditor+ |
@@ -165,7 +165,7 @@ sequenceDiagram
   A->>D: append event, audit event
 ```
 
-Any confirmation (a new document, a revision, an index value or its correction) re-evaluates every open claim of the carrier (all carriers for a tenant-wide index value): a changed unsent claim becomes stale, a changed sent claim is flagged; recording a send recomputes once more (review round 1, 2026-11-11). Approval recomputes inside one transaction and fails closed if any line's document revision or fuel index value is unconfirmed, superseded or outside its effective dates, or if the invoice lacks the date the document's basis needs. The same marking runs when a confirmed fuel index value is corrected. A claim already sent cannot be recalled; the product flags it, counts it in the wrong-basis metric and generates a withdrawal note for the user to send (IT-06, IT-20, E2E-02).
+Any confirmation (a new document, a revision, an index value or its correction) re-evaluates the open claims that document can govern: same carrier and a lane-less document, a lane document only for invoices on that lane, a rate confirmation only for its PRO (all carriers for a tenant-wide index value) (review round 2, 2026-11-11): a changed unsent claim becomes stale, a changed sent claim is flagged; recording a send recomputes once more (review round 1, 2026-11-11). Approval recomputes inside one transaction and fails closed if any line's document revision or fuel index value is unconfirmed, superseded or outside its effective dates, or if the invoice lacks the date the document's basis needs. The same marking runs when a confirmed fuel index value is corrected. A claim already sent cannot be recalled; the product flags it, counts it in the wrong-basis metric and generates a withdrawal note for the user to send (IT-06, IT-20, E2E-02).
 
 ### 6.3 Jobs, retries, timeouts, idempotency
 
@@ -177,7 +177,7 @@ Any confirmation (a new document, a revision, an index value or its correction) 
 | `build_claim_packet` | 60 s | 3 | claim ID + version | Draft shows "packet failed, retry" |
 | `build_report`, `export` | 5 min | 2 | request ID | User notified; retry button |
 | `retention_sweep`, `delete_tenant_data` | 10 min | resumes from last key | run date or request ID | Alert; next run continues |
-| `deadline_sweep` (daily) | 5 min | 3 | run date | Alert; reminders at 30, 14 and 3 days are sent once each (`notification` row); unsent confirmed claims past contest-by become `expired` |
+| `deadline_sweep` (daily) | 5 min | 3 | run date | Alert; reminders at 30, 14 and 3 days are sent once each (`notification` row); unsent (draft or approved) claims past contest-by are marked `past_contest_by` once; the sweep never expires a claim, and sending stays blocked unless an override with reason and Approver is recorded (review round 2, 2026-11-11) |
 
 Job rows carry `state`, `attempt`, `version`, `correlation_id`. A transition is an `UPDATE ... WHERE version = :v` against an allowed-transition table; a completed job never returns to running (R-01). A browser or proxy timeout does not cancel the job: the client retries with the same `Idempotency-Key` and receives the stored result (R-02). Batch uploads create one job per file and a batch summary of done, failed and skipped-duplicate counts (R-19).
 

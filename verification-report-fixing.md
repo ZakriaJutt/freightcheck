@@ -292,3 +292,42 @@ Other changes: migration `0002` (expand only: `invoice.lane_key`, `claim.late_se
 | `DEV_SMOKE=1 tools/dev.sh` | API ready on 8102, worker started, session written to `.local/dev-session.txt` |
 
 Documents changed in round 1: PRD.md (MH-08, MH-09, MH-10, C-01, C-03), schema.md (`scope_key`, fuel value precedence, `lane_key`, `late_send_*`, `excess_reason`, `notification`), TRD.md 5.1 and 6.2 (send guards, settlements, invoices, 500 contract, re-evaluation on any confirmation), AGENTS.md utilities index. Decision.md section 4 is not changed: the receipt bound is input validation, not a new deadline rule.
+
+### 9.2 Review round 2 (retest, 2026-11-11)
+
+Reviewer verdicts, transcribed unchanged from `_coordination/review/freightcheck-b1-verdicts.json` (round 2, commit `d507b7c`):
+
+| Finding | Reviewer verdict |
+|---|---|
+| B1-001 | Closed |
+| B1-002 | Closed |
+| B1-003 | Closed |
+| B1-004 | Closed, part open: entered revision with an earlier start does not block, resolver falls through to tariff (B1-015) |
+| B1-005 | Closed |
+| B1-006 | Closed |
+| B1-007 | Closed |
+| B1-008 | Closed |
+| B1-009 | Closed |
+| B1-010 | Closed |
+| B1-011 | Closed |
+| B1-012 | Closed |
+
+New findings in round 2 and this round's edits. All of these were **fixed after retest** and have not been reviewed again:
+
+| Finding | Fix (fixed after retest) | Regression tests |
+|---|---|---|
+| B1-013 major (regression) | A confirmed document re-evaluates only claims it can govern: same carrier, and either a lane-less document, a lane document for invoices on that lane, or a rate confirmation for its PRO (`fc_db.ops.document_governs`). An unrelated lane document marks nothing and no longer adds to `wrong_basis_sent`. A send whose basis has become undeterminable is refused with 409 `BASIS_UNRESOLVED`, which gives no withdrawal note, instead of `STALE_BASIS` | `test_b1_013_unrelated_lane_document_*`, `test_b1_013_lane_document_revision_still_marks_*` |
+| B1-014 major (regression), ruling applied | The sweep marks draft and approved claims past contest-by with `past_contest_by` (migration `0003`), once. It never expires or deletes a claim. Approval under MH-08 stays possible with a typed reason, and sending stays blocked without a recorded override. PRD MH-09, App-flow, TRD 6.3, schema, execution-plan UT-15 and T-4.2.7 now say the same | `test_b1_014_sweep_marks_*` (core), `test_sweep_marks_past_contest_by_*` (API, reviewer case R1) |
+| B1-015 major (B1-004 open part) | An entered revision that may govern a date its confirmed prior does not cover blocks the line, so C-02 never falls through to the tariff. Inside the prior's dates, the prior still governs while the revision is pending. This closes the open part of B1-004 | `test_b1_015_pending_revision_*` (reviewer case R9) |
+
+Reviewer's R6 note (a `lane_key` that matches no lane document uses the wildcard) is recorded and not changed.
+
+| Script | Before this round | After |
+|---|---|---|
+| `freightcheck-b1-round2_adversarial.py` (9) | 6 passed, 3 failed (R1, R5, R9) | 9 passed |
+| `freightcheck-b1-api_adversarial.py` (10, B5 as rewritten by the reviewer) | 10 passed | 10 passed |
+| `freightcheck-b1-core_adversarial.py` (15) | 15 ok | 15 ok |
+
+Current results (clean test database, head `0003`): `make test-unit` 64 passed, 0 failed; `make test-int` 41 passed, 0 failed. `make lint` passed (43 files). `make typecheck` passed (31 files). `make check-boundaries` found 0 violations.
+
+Documents changed this round: PRD.md (MH-09), App-flow.md (past contest-by state), TRD.md (5.1 send `BASIS_UNRESOLVED`, 6.2 re-evaluation scope, 6.3 `deadline_sweep`), schema.md (`past_contest_by`, lane re-evaluation, pending revision), execution-plan.md (UT-15, T-4.2.7). MH-08 text was already consistent with the ruling and is unchanged.

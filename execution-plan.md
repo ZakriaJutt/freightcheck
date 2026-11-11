@@ -185,7 +185,7 @@ Entry: T-4.1.3. Dependencies: none. Owner: Developer. Outcome: each check indepe
 | T-4.2.4 | MH-04 | Developer | 8-12 | C-04 accessorial amount and support | UT-04 passes | Schedule match; document test |
 | T-4.2.5 | MH-05 | Developer | 6-10 | C-01 duplicates across invoices and AP payments | UT-05 passes | Keys; side-by-side data |
 | T-4.2.6 | MH-04 | Developer | 8-12 | C-05 reweigh, C-06 reclass, C-08 late rebill | UT-11 passes | Compare with BOL; certificate test; rebill date |
-| T-4.2.7 | MH-09 | Developer | 6-10 | Deadline calculator with receipt evidence rules; daily sweep with reminders and expiry | UT-07 and UT-15 pass | Evidence order; bases; broker case; sweep |
+| T-4.2.7 | MH-09 | Developer | 6-10 | Deadline calculator with receipt evidence rules; daily sweep with reminders and the past-contest-by mark (review round 2, 2026-11-11) | UT-07 and UT-15 pass | Evidence order; bases; broker case; sweep |
 
 ### Phase 5 — Claims and results (W17-W19)
 
@@ -311,7 +311,7 @@ All **Not run**. Synthetic carrier "Example Freight Lines"; synthetic tenants T1
 | UT-12 | 60 fixture invoices | Run extractor | Field accuracy above 95%; no wrong money field above the confidence floor |
 | UT-13 | Tenant, purpose, source, file | Build storage key | `t/{tenant}/{purpose}/{source}/{uuid}`; user filename absent; two calls differ |
 | UT-14 | Claim with lines 27.72 and 12.99 | Render template | Total 40.71; cites document, page and dates; no free text from a model |
-| UT-15 | Confirmed unsent claims with 30, 14, 3 and −1 days left; sweep run twice on the same day | Run the deadline sweep logic | One reminder per threshold per claim, none repeated; the −1 claim becomes `expired`; a sent claim is untouched |
+| UT-15 | Confirmed unsent claims with 30, 14, 3 and −1 days left; sweep run twice on the same day | Run the deadline sweep logic | One reminder per threshold per claim, none repeated; the −1 claim is marked `past_contest_by` once and is not expired (review round 2, 2026-11-11); a sent claim is untouched |
 
 ### 7.2 Integration tests (real Postgres, fake providers)
 

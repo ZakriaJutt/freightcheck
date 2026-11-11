@@ -71,7 +71,7 @@ The left navigation reaches S-06, S-07, S-09, S-11, S-13, S-14, S-03 and S-15 fr
 | Session expired | Any | Sign in again → return to the same route; unsaved form values restored from local draft |
 | Stale basis | S-10 | Banner with old and new amounts; approve and Mark as sent disabled until reviewed and re-approved |
 | Basis changed after send | S-10, S-11 | Banner and ledger flag with old and new amounts; actions: Withdraw (note generated) or record "reviewed, claim stands" with a reason |
-| Past contest-by | S-09, S-10 | Row and claim marked "past contest-by date"; approve asks for an override reason; unsent claims become expired at the daily sweep |
+| Past contest-by | S-09, S-10 | Row and claim marked "past contest-by date"; approve asks for an override reason; the daily sweep marks unsent claims `past_contest_by` and never expires them, so approval and send stay possible with a recorded reason (review round 2, 2026-11-11) |
 
 ## 4. Browser behaviour
 
